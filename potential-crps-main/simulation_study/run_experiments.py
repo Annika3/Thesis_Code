@@ -60,9 +60,7 @@ def pc(pred, y):
     return mean_crps
 
 def tw_crps(self, obs, t):
-    """
-    Method to compute threshold-weighted CRPS.
-    """
+    
     predictions = self.predictions
     y = np.array(obs)
     if y.ndim > 1:
@@ -92,9 +90,7 @@ def tw_crps(self, obs, t):
     return list(map(tw_crps0, y, p, w, x, T))
 
 def tw_crps_masked(self, obs, t):
-    """
     
-    """
     predictions = self.predictions
     y = np.array(obs)
     if y.ndim > 1:
@@ -124,9 +120,7 @@ def tw_crps_masked(self, obs, t):
     return list(map(tw_crps0, y, p, w, x, T))
 
 def qw_crps(self, obs, q=0.9):
-    """
-    Quantile-weighted CRPS for all quantiles above q_relevant, using 199 grid points.
-    """
+    
     q_levels = np.linspace(0.005, 0.995, 199)
     y = np.array(obs)
     qf = self.qpred(q_levels)
@@ -154,7 +148,7 @@ def tw_pc_masked(pred, y, t):
     fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
     prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
 
-    type(prob_pred).tw_crps_masked = tw_crps_masked # monkey-patch the tw_crps method into the prediction object
+    type(prob_pred).tw_crps_masked = tw_crps_masked # monkey-patch the tw_crps_masked method into the prediction object
 
     tw_crps_scores = prob_pred.tw_crps_masked(y, t)
     mean_tw_crps = np.mean(tw_crps_scores)
@@ -164,8 +158,7 @@ def qw_pc(pred, y, q=0.9):
     
     fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
     prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
-    type(prob_pred).qw_crps = qw_crps   # monkey-patch if not already attached
-
+    type(prob_pred).qw_crps = qw_crps 
     qwcrps_scores = prob_pred.qw_crps(y, q=q)
     return np.mean(qwcrps_scores)
 
@@ -357,10 +350,10 @@ def test_of_new_functions():
     y = pred_data['y']
     fcst = pred_data['f1']
 
-    # Set threshold to a value smaller than all data
+    # threshold < all data
     t_test = min(np.min(y), np.min(fcst)) - 1.0
 
-    # Compute regular and thresholded CRPS
+    # Compute regular & thresholded CRPS
     pc_val = pc(fcst, y)
     tw_pc_val = tw_pc(fcst, y, t_test)
 
@@ -371,6 +364,7 @@ def test_of_new_functions():
     # Compute quantile-weighted CRPS
     lowest_q = 0.001
     qw_pc_val = qw_pc(fcst, y, q=lowest_q)
+
     print(f"qw_PC (quantiles > {lowest_q}):", qw_pc_val)
     print(f"Absolute difference (PC - qw_PC): {abs(pc_val - qw_pc_val)}")
 
