@@ -13,6 +13,7 @@ import os
 from isodisreg import idr       # to compute isotonic regression fit
 import urocc                    # to compute CPA
 
+# import scoringrules as sr
 
 save_plots = 'plots/'
 
@@ -58,6 +59,118 @@ def pc(pred, y):
     mean_crps = np.mean(prob_pred.crps(y))
     return mean_crps
 
+def tw_crps(self, obs, t):
+    """
+    Method to compute threshold-weighted CRPS.
+    """
+    predictions = self.predictions
+    y = np.array(obs)
+    if y.ndim > 1:
+        raise ValueError("obs must be a 1-D array")
+    if np.isnan(np.sum(y)):
+        raise ValueError("obs contains nan values")
+    if y.size != 1 and len(y) != len(predictions):
+        raise ValueError("obs must have length 1 or the same length as predictions")
+
+    def get_points(pred):
+        return np.array(pred.points)
+    def get_cdf(pred):
+        return np.array(pred.ecdf)
+    def modify_points(cdf):
+        return np.hstack([cdf[0], np.diff(cdf)])
+
+    def tw_crps0(y, p, w, x, t):
+        x = np.maximum(x, t)
+        y = np.maximum(y, t)
+        return 2 * np.sum(w * ((y < x).astype(float) - p + 0.5 * w) * (x - y))
+
+    x = list(map(get_points, predictions))
+    p = list(map(get_cdf, predictions))
+    w = list(map(modify_points, p))
+
+    T = [t] * len(y)   
+    return list(map(tw_crps0, y, p, w, x, T))
+
+def tw_crps_masked(self, obs, t):
+    """
+    
+    """
+    predictions = self.predictions
+    y = np.array(obs)
+    if y.ndim > 1:
+        raise ValueError("obs must be a 1-D array")
+    if np.isnan(np.sum(y)):
+        raise ValueError("obs contains nan values")
+    if y.size != 1 and len(y) != len(predictions):
+        raise ValueError("obs must have length 1 or the same length as predictions")
+
+    def get_points(pred):
+        return np.array(pred.points)
+    def get_cdf(pred):
+        return np.array(pred.ecdf)
+    def modify_points(cdf):
+        return np.hstack([cdf[0], np.diff(cdf)])
+
+    def tw_crps0(y, p, w, x, t):
+        mask = (x >= t).astype(float)
+        w_masked = w * mask
+        return 2 * np.sum(w_masked * ((y < x).astype(float) - p + 0.5 * w_masked) * (x - y))
+
+    x = list(map(get_points, predictions))
+    p = list(map(get_cdf, predictions))
+    w = list(map(modify_points, p))
+
+    T = [t] * len(y)   
+    return list(map(tw_crps0, y, p, w, x, T))
+
+def qw_crps(self, obs, q=0.9):
+    """
+    Quantile-weighted CRPS for all quantiles above q_relevant, using 199 grid points.
+    """
+    q_levels = np.linspace(0.005, 0.995, 199)
+    y = np.array(obs)
+    qf = self.qpred(q_levels)
+    weights = (q_levels > q).astype(float)
+    d_alpha = q_levels[1] - q_levels[0] 
+
+    def qw_crps_single(y_i, qf_i):
+        indicator = (qf_i >= y_i).astype(float)
+        return 2 * np.sum(weights * (indicator - q_levels) * (qf_i - y_i) * d_alpha)
+
+    return [qw_crps_single(y[i], qf[i, :]) for i in range(len(y))]
+
+
+def tw_pc(pred, y, t): 
+    fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
+    prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
+
+    type(prob_pred).tw_crps = tw_crps # monkey-patch the tw_crps method into the prediction object
+
+    tw_crps_scores = prob_pred.tw_crps(y, t)
+    mean_tw_crps = np.mean(tw_crps_scores)
+    return mean_tw_crps
+
+def tw_pc_masked(pred, y, t): 
+    fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
+    prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
+
+    type(prob_pred).tw_crps_masked = tw_crps_masked # monkey-patch the tw_crps method into the prediction object
+
+    tw_crps_scores = prob_pred.tw_crps_masked(y, t)
+    mean_tw_crps = np.mean(tw_crps_scores)
+    return mean_tw_crps
+
+def qw_pc(pred, y, q=0.9):
+    
+    fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
+    prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
+    type(prob_pred).qw_crps = qw_crps   # monkey-patch if not already attached
+
+    qwcrps_scores = prob_pred.qw_crps(y, q=q)
+    return np.mean(qwcrps_scores)
+
+
+
 def my_crps(x, cum_weights, y):
     weights = cum_weights - np.hstack((np.zeros(((y.size, 1))), cum_weights[:, :-1]))
     # the formula is simply extracted from idr predict crps function
@@ -79,6 +192,21 @@ def pcs(pred, y):
     pc_ref = np.mean(np.abs(np.tile(y, (len(y), 1)) - np.tile(y, (len(y), 1)).transpose())) / 2
 
     return (pc_ref - pc(pred, y)) / pc_ref
+
+def tw_pcs(pred, y, t):
+    tw_crps_ref = tw_pc(y, y, t)
+    tw_crps_model = tw_pc(pred, y, t)
+
+    print(f"min(y): {np.min(y):.3f}")
+    print(f"max(y): {np.max(y):.3f}")
+    print(f"min(pred): {np.min(pred):.3f}")
+    print(f"max(pred): {np.max(pred):.3f}")
+
+    if tw_crps_ref == 0:
+        print(f"Warning: tw_crps_ref == 0 for threshold {t}")
+        return np.nan
+    return (tw_crps_ref - tw_crps_model) / tw_crps_ref
+
 
 
 # simulation routines ----------------------------------------------------------------
@@ -108,7 +236,7 @@ def run_simulation_example_1(n=1000, square_y=False):
         y = pred_data['y']**2
         add_name = '_squared'
 
-    loss_fcts = {'RMSE': rmse, 'MAE': mae, 'QL90': ql90, 'PC': pc, 'ACC': acc, 'CPA': cpa, 'PCS': pcs}
+    loss_fcts = {'RMSE': rmse, 'MAE': mae, 'QL90': ql90, 'PC': pc, 'ACC': acc, 'CPA': cpa, 'PCS': pcs, 'tw_PC': lambda pred, y: tw_pc(pred, y, t=24), 'tw_masked': lambda pred, y: tw_pc_masked(pred, y, t=24), 'qw_PC': lambda pred, y: qw_pc(pred, y, q=0.9)}
 
     fcsts = pred_data.columns[pred_data.columns != 'y']
     loss_vals = np.zeros((len(fcsts), len(loss_fcts)))
@@ -141,7 +269,7 @@ def run_simulation_example_2(thresh_list=[10], add_name=''):
         res.insert(0, 'Model', fcsts)
 
         df_all = pd.concat((df_all, res))
-
+    print(df_all)
     df_all.to_csv(os.path.join(save_plots, 'loss_values_bin' + add_name + '.csv'))
 
 
@@ -149,13 +277,14 @@ def run_simulation_example_2(thresh_list=[10], add_name=''):
 # print and plot  ----------------------------------------------------------------
 
 def print_results():
+   #  column_order = ['RMSE', 'MAE', 'QL90', 'PC', 'ACC', 'CPA', 'PCS', 'tw_PC']
     column_order = ['RMSE', 'MAE', 'QL90', 'PC', 'ACC', 'CPA', 'PCS']
-
     t = pd.read_csv(os.path.join(save_plots, 'loss_values.csv'))
+    # print(t.loc[:, column_order].round({'RMSE': 2, 'MAE': 2, 'QL90': 2, 'PC': 2, 'ACC': 3, 'CPA': 3, 'PCS': 3, 'tw_PC': 3}))
     print(t.loc[:, column_order].round({'RMSE': 2, 'MAE': 2, 'QL90': 2, 'PC': 2, 'ACC': 3, 'CPA': 3, 'PCS': 3}))
     t = pd.read_csv(os.path.join(save_plots, 'loss_values_squared.csv'))
+    # print(t.loc[:, column_order].round({'RMSE': 0, 'MAE': 0, 'QL90': 0, 'PC': 0, 'ACC': 3, 'CPA': 3, 'PCS': 3, 'tw_PC': 3}))
     print(t.loc[:, column_order].round({'RMSE': 0, 'MAE': 0, 'QL90': 0, 'PC': 0, 'ACC': 3, 'CPA': 3, 'PCS': 3}))
-
 
 def plot_data(df):
     plt.figure()
@@ -222,15 +351,41 @@ def plot_runtime():
     plt.tight_layout()
     g.get_figure().savefig(os.path.join(save_plots, 'runtime.png'))
 
+def test_of_new_functions():
+    # Generate test data
+    pred_data = get_data(n=1000, seed=1)
+    y = pred_data['y']
+    fcst = pred_data['f1']
+
+    # Set threshold to a value smaller than all data
+    t_test = min(np.min(y), np.min(fcst)) - 1.0
+
+    # Compute regular and thresholded CRPS
+    pc_val = pc(fcst, y)
+    tw_pc_val = tw_pc(fcst, y, t_test)
+
+    print("PC (CRPS):", pc_val)
+    print("tw_PC at threshold=min-1:", tw_pc_val)
+    print("Absolute difference:", abs(pc_val - tw_pc_val))
+
+    # Compute quantile-weighted CRPS
+    lowest_q = 0.001
+    qw_pc_val = qw_pc(fcst, y, q=lowest_q)
+    print(f"qw_PC (quantiles > {lowest_q}):", qw_pc_val)
+    print(f"Absolute difference (PC - qw_PC): {abs(pc_val - qw_pc_val)}")
+
+
 
 if __name__ == '__main__':
     if not os.path.exists(save_plots):
         print(f'Please create directory {save_plots}')
     else:
-        # run_simulation_example_1(n=1000, square_y=False)
+         run_simulation_example_1(n=1000, square_y=False)
+         test_of_new_functions()
         # run_simulation_example_1(n=1000, square_y=True)
-        run_simulation_example_2(thresh_list=np.linspace(1, 40, 40), add_name='_graph')
-        plot_thresh_graph()
-        print_results()
+        # run_simulation_example_2(thresh_list=np.linspace(1, 40, 40), add_name='_graph')
+        # run_simulation_example_2(thresh_list=[30], add_name='_graph')
+        # plot_thresh_graph()
+        # print_results()
         # analyze_runtime()
         # plot_runtime()
