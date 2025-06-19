@@ -89,10 +89,13 @@ def tw_crps(self, obs, t):
     T = [t] * len(y)   
     return list(map(tw_crps0, y, p, w, x, T))
 
-def tw_crps_masked(self, obs, t):
-    
+
+def qw_crps(self, obs, q=0.9):
+
     predictions = self.predictions
     y = np.array(obs)
+    J = 199
+
     if y.ndim > 1:
         raise ValueError("obs must be a 1-D array")
     if np.isnan(np.sum(y)):
@@ -100,26 +103,19 @@ def tw_crps_masked(self, obs, t):
     if y.size != 1 and len(y) != len(predictions):
         raise ValueError("obs must have length 1 or the same length as predictions")
 
-    def get_points(pred):
-        return np.array(pred.points)
-    def get_cdf(pred):
-        return np.array(pred.ecdf)
-    def modify_points(cdf):
-        return np.hstack([cdf[0], np.diff(cdf)])
+    alphas = np.arange(1, J) / J  # j/J, j=1,...,J-1
+    weights = (alphas > q).astype(float)
+    qf = self.qpred(alphas)  # shape (n_samples, J-1)
+    def qw_crps_single(y_i, qf_i):
+        pinball = 2 * ((y_i < qf_i).astype(float) - alphas) * (qf_i - y_i)
+        return np.sum(weights * pinball) / (J - 1)
+    
+    return [qw_crps_single(y[i], qf[i, :]) for i in range(len(y))]
 
-    def tw_crps0(y, p, w, x, t):
-        mask = (x >= t).astype(float)
-        w_masked = w * mask
-        return 2 * np.sum(w_masked * ((y < x).astype(float) - p + 0.5 * w_masked) * (x - y))
+    
+    
 
-    x = list(map(get_points, predictions))
-    p = list(map(get_cdf, predictions))
-    w = list(map(modify_points, p))
-
-    T = [t] * len(y)   
-    return list(map(tw_crps0, y, p, w, x, T))
-
-def qw_crps(self, obs, q=0.9):
+def qw_crps_approx(self, obs, q=0.9):
     
     q_levels = np.linspace(0.005, 0.995, 199)
     y = np.array(obs)
@@ -127,11 +123,11 @@ def qw_crps(self, obs, q=0.9):
     weights = (q_levels > q).astype(float)
     d_alpha = q_levels[1] - q_levels[0] 
 
-    def qw_crps_single(y_i, qf_i):
+    def qw_crps_approx_single(y_i, qf_i):
         indicator = (qf_i >= y_i).astype(float)
         return 2 * np.sum(weights * (indicator - q_levels) * (qf_i - y_i) * d_alpha)
 
-    return [qw_crps_single(y[i], qf[i, :]) for i in range(len(y))]
+    return [qw_crps_approx_single(y[i], qf[i, :]) for i in range(len(y))]
 
 
 def tw_pc(pred, y, t): 
@@ -144,22 +140,20 @@ def tw_pc(pred, y, t):
     mean_tw_crps = np.mean(tw_crps_scores)
     return mean_tw_crps
 
-def tw_pc_masked(pred, y, t): 
-    fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
-    prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
-
-    type(prob_pred).tw_crps_masked = tw_crps_masked # monkey-patch the tw_crps_masked method into the prediction object
-
-    tw_crps_scores = prob_pred.tw_crps_masked(y, t)
-    mean_tw_crps = np.mean(tw_crps_scores)
-    return mean_tw_crps
-
 def qw_pc(pred, y, q=0.9):
     
     fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
     prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
-    type(prob_pred).qw_crps = qw_crps 
+    type(prob_pred).qw_crps = qw_crps
     qwcrps_scores = prob_pred.qw_crps(y, q=q)
+    return np.mean(qwcrps_scores)
+
+def qw_pc_approx(pred, y, q=0.9):
+    
+    fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
+    prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
+    type(prob_pred).qw_crps_approx = qw_crps_approx 
+    qwcrps_scores = prob_pred.qw_crps_approx(y, q=q)
     return np.mean(qwcrps_scores)
 
 
@@ -187,18 +181,57 @@ def pcs(pred, y):
     return (pc_ref - pc(pred, y)) / pc_ref
 
 def tw_pcs(pred, y, t):
-    tw_crps_ref = tw_pc(y, y, t)
-    tw_crps_model = tw_pc(pred, y, t)
 
-    print(f"min(y): {np.min(y):.3f}")
-    print(f"max(y): {np.max(y):.3f}")
-    print(f"min(pred): {np.min(pred):.3f}")
-    print(f"max(pred): {np.max(pred):.3f}")
+    y_thresh = np.maximum(y, t)
+    pc_ref = np.mean(np.abs(np.tile(y_thresh, (len(y_thresh), 1)) - np.tile(y_thresh, (len(y_thresh), 1)).transpose())) / 2
 
-    if tw_crps_ref == 0:
-        print(f"Warning: tw_crps_ref == 0 for threshold {t}")
-        return np.nan
-    return (tw_crps_ref - tw_crps_model) / tw_crps_ref
+    pc_model = tw_pc(pred, y, t)
+
+    pcs = (pc_ref - pc_model) / pc_ref
+    '''
+    # slow version of pcs, which uses the climatological forecast (to be copied to qw_pcs)
+    def climatological_tw_pc(y, t):
+        """
+        Compute PCRPS using a climatological forecast: fit IDR on y, predict same pooled ECDF for all y.
+        This avoids overfitting and returns the proper CRPS reference value.
+        """
+        x_dummy = np.zeros_like(y)  # All predictors the same → 1 pooled distribution
+        fitted_idr = idr(y, pd.DataFrame({'x': x_dummy}))
+        prob_pred = fitted_idr.predict(pd.DataFrame({'x': x_dummy}))
+
+        type(prob_pred).tw_crps = tw_crps # monkey-patch 
+
+        tw_crps_scores = prob_pred.tw_crps(y, t)
+        mean_tw_crps = np.mean(tw_crps_scores)
+        return mean_tw_crps
+
+    slow_pcs = (climatological_tw_pc(y, t) - pc_model) / climatological_tw_pc(y, t)
+    print("fast_pcs: ", pcs, "slow_pcs: ", slow_pcs)
+    '''
+    return pcs
+
+def qw_pcs(pred, y, q):
+
+    pc_model = qw_pc(pred, y, q)
+    
+    def climatological_qw_pc(y, q):
+        """
+        Compute PCRPS using a climatological forecast: fit IDR on y, predict same pooled ECDF for all y.
+        This avoids overfitting and returns the proper CRPS reference value.
+        """
+        x_dummy = np.zeros_like(y)  # All predictors the same -> 1 pooled distribution
+        fitted_idr = idr(y, pd.DataFrame({'x': x_dummy}))
+        prob_pred = fitted_idr.predict(pd.DataFrame({'x': x_dummy}))
+
+        type(prob_pred).qw_crps = qw_crps # monkey-patch 
+
+        qw_crps_scores = prob_pred.tw_crps(y, q)
+        mean_qw_crps = np.mean(qw_crps_scores)
+        return mean_qw_crps
+    pc_ref = climatological_qw_pc(y, q)
+    pcs = (pc_ref - pc_model) / pc_ref    
+    return pcs
+
 
 
 
@@ -229,7 +262,7 @@ def run_simulation_example_1(n=1000, square_y=False):
         y = pred_data['y']**2
         add_name = '_squared'
 
-    loss_fcts = {'RMSE': rmse, 'MAE': mae, 'QL90': ql90, 'PC': pc, 'ACC': acc, 'CPA': cpa, 'PCS': pcs, 'tw_PC': lambda pred, y: tw_pc(pred, y, t=24), 'tw_masked': lambda pred, y: tw_pc_masked(pred, y, t=24), 'qw_PC': lambda pred, y: qw_pc(pred, y, q=0.9)}
+    loss_fcts = {'RMSE': rmse, 'MAE': mae, 'QL90': ql90, 'PC': pc, 'ACC': acc, 'CPA': cpa, 'PCS': pcs, 'tw_PC': lambda pred, y: tw_pc(pred, y, t=24), 'tw_PCS': lambda pred, y: tw_pcs(pred, y, t=24), 'qw_PC_appr': lambda pred, y: qw_pc_approx(pred, y, q=0.9), 'qw_PC': lambda pred, y: qw_pc(pred, y, q=0.9)}
 
     fcsts = pred_data.columns[pred_data.columns != 'y']
     loss_vals = np.zeros((len(fcsts), len(loss_fcts)))
@@ -344,6 +377,7 @@ def plot_runtime():
     plt.tight_layout()
     g.get_figure().savefig(os.path.join(save_plots, 'runtime.png'))
 
+
 def test_of_new_functions():
     # Generate test data
     pred_data = get_data(n=1000, seed=1)
@@ -368,6 +402,24 @@ def test_of_new_functions():
     print(f"qw_PC (quantiles > {lowest_q}):", qw_pc_val)
     print(f"Absolute difference (PC - qw_PC): {abs(pc_val - qw_pc_val)}")
 
+   # PCS: pc_ref manual vs. pc(y, y)
+    pc_ref_manual = np.mean(np.abs(np.tile(y, (len(y), 1)) - np.tile(y, (len(y), 1)).transpose())) / 2
+    def climatological_pc(y):
+        """
+        Compute PCRPS using a climatological forecast: fit IDR on y, predict same pooled ECDF for all y.
+        This avoids overfitting and returns the proper CRPS reference value.
+        """
+        x_dummy = np.zeros_like(y)  # All predictors the same → 1 pooled distribution
+        fitted_idr = idr(y, pd.DataFrame({'x': x_dummy}))
+        prob_pred = fitted_idr.predict(pd.DataFrame({'x': x_dummy}))
+
+        return np.mean(prob_pred.crps(y))
+    pc_ref_func = climatological_pc(y)
+
+    print("\nVergleich pc_ref Varianten:")
+    print("Result manual pc_ref: ", pc_ref_manual)
+    print("Result using sort of pc(y): ", pc_ref_func)
+    print("Difference: ", np.abs(pc_ref_manual - pc_ref_func))
 
 
 if __name__ == '__main__':
@@ -383,3 +435,62 @@ if __name__ == '__main__':
         # print_results()
         # analyze_runtime()
         # plot_runtime()
+
+# archive ----------------------------------------------------------------
+def tw_pc_masked(pred, y, t): 
+    fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
+    prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
+
+    type(prob_pred).tw_crps_masked = tw_crps_masked # monkey-patch the tw_crps_masked method into the prediction object
+
+    tw_crps_scores = prob_pred.tw_crps_masked(y, t)
+    mean_tw_crps = np.mean(tw_crps_scores)
+    return mean_tw_crps
+
+def tw_crps_masked(self, obs, t):
+    
+    predictions = self.predictions
+    y = np.array(obs)
+    if y.ndim > 1:
+        raise ValueError("obs must be a 1-D array")
+    if np.isnan(np.sum(y)):
+        raise ValueError("obs contains nan values")
+    if y.size != 1 and len(y) != len(predictions):
+        raise ValueError("obs must have length 1 or the same length as predictions")
+
+    def get_points(pred):
+        return np.array(pred.points)
+    def get_cdf(pred):
+        return np.array(pred.ecdf)
+    def modify_points(cdf):
+        return np.hstack([cdf[0], np.diff(cdf)])
+
+    def tw_crps0(y, p, w, x, t):
+        mask = (x >= t).astype(float)
+        w_masked = w * mask
+        return 2 * np.sum(w_masked * ((y < x).astype(float) - p + 0.5 * w_masked) * (x - y))
+
+    x = list(map(get_points, predictions))
+    p = list(map(get_cdf, predictions))
+    w = list(map(modify_points, p))
+
+    T = [t] * len(y)   
+    return list(map(tw_crps0, y, p, w, x, T))
+
+
+def pc0(y):
+    """
+    Compute PC^(0) = (1/(2*n^2)) * \sum_{i,j} |y[i] - y[j]| using a sorted-based O(n log n) approach for a 1D array y.
+
+    Parameters:
+        y (1D array-like): Observations or values along time.
+
+    Returns:
+        float: The computed PC^(0) value.
+    """
+    n = len(y)
+    y_sorted = np.sort(y)
+    ranks = np.arange(1, n + 1)          
+    weights = 2 * ranks - n - 1  
+
+    return np.sum(weights * y_sorted) / (n**2)
