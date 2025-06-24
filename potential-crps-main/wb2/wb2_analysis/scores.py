@@ -91,17 +91,14 @@ def tw_pcs(pred, y, t):
 
     pc_model = tw_pc(pred, y, t)
 
-    pcs = (pc_ref - pc_model) / pc_ref
+    pcs = (pc_ref - pc_model) / pc_ref 
    
     return pcs
 
 # quantile weighted
 def qw_crps(self, obs, q=0.9):
-
     predictions = self.predictions
     y = np.array(obs)
-    J = 199
-
     if y.ndim > 1:
         raise ValueError("obs must be a 1-D array")
     if np.isnan(np.sum(y)):
@@ -109,14 +106,27 @@ def qw_crps(self, obs, q=0.9):
     if y.size != 1 and len(y) != len(predictions):
         raise ValueError("obs must have length 1 or the same length as predictions")
 
-    alphas = np.arange(1, J) / J  # j/J, j=1,...,J-1
-    weights = (alphas > q).astype(float)
-    qf = self.qpred(alphas)  # shape (n_samples, J-1)
-    def qw_crps_single(y_i, qf_i):
-        pinball = 2 * ((y_i < qf_i).astype(float) - alphas) * (qf_i - y_i)
-        return np.sum(weights * pinball) / (J - 1)
-    
-    return [qw_crps_single(y[i], qf[i, :]) for i in range(len(y))]
+    def get_points(pred):
+        return np.array(pred.points)
+    def get_cdf(pred):
+        return np.array(pred.ecdf)
+    def get_weights(cdf):
+        return np.hstack([cdf[0], np.diff(cdf)])
+
+    def qw_crps0(y, p, w, x, q):
+        c_cum = np.cumsum(w)
+        c_cum_prev = np.hstack(([0], c_cum[:-1]))
+        c_cum_star = np.maximum(c_cum, q)
+        c_cum_prev_star = np.maximum(c_cum_prev, q)
+        indicator = (x >= y).astype(float)
+        terms = indicator * (c_cum_star - c_cum_prev_star) - 0.5 * (c_cum_star**2 - c_cum_prev_star**2)
+        return 2 * np.sum(terms * (x - y))
+
+    x = list(map(get_points, predictions))
+    p = list(map(get_cdf, predictions))
+    w = list(map(get_weights, p))
+    Q = [q] * len(y)
+    return list(map(qw_crps0, y, p, w, x, Q))
 
 def qw_pc(pred, y, q=0.9):
     
@@ -148,7 +158,7 @@ def qw_pcs(pred, y, q):
         mean_qw_crps = np.mean(qw_crps_scores)
         return mean_qw_crps
     pc_ref = climatological_qw_pc(y, q)
-    pcs = (pc_ref - pc_model) / pc_ref    
+    pcs = (pc_ref - pc_model) / pc_ref   
     return pcs
 
 
@@ -176,68 +186,66 @@ total_vars = len(variables)
 var_counter = 0
 # ka_lat = 49.00937
 # ka_lon = 8.40444
-var = '2m_temperature'
 lead_time = np.timedelta64(3, 'D')
 time_range = slice('2020-01-01','2020-12-31')
 
-t = 273.15
+var = '2m_temperature' # dummy run to see duration of the loop
+
 q = 0.9
+# compute t 
+# all_obs = observations[var].sel(time=time_range).values.flatten()
+# t = np.quantile(all_obs, 0.5)
+# print("Global 0.5 quantile threshold (t) is:", t)
+
+t = 1 # dummy value for t, replace with actual quantile computation if needed
+
 
 results = []
-for var in variables:
-    for lead_time in lead_times:
-        for lat in lats:
-            for lon in lons:
-                try:
-                    preds_point = forecasts.sel(
-                        prediction_timedelta=lead_time,
-                        latitude=lat,
-                        longitude=lon,
-                        method='nearest'
-                    ).sel(time=time_range)[var].load()
+for i, lat in enumerate(lats):
+    print(f"Processing lat {i+1}/{len(lats)}")
+    for lon in lons:
+        try:
+            preds_point = forecasts.sel(
+                prediction_timedelta=lead_time,
+                latitude=lat,
+                longitude=lon,
+                method='nearest'
+            ).sel(time=time_range)[var].load()
+            valid_time = preds_point.time + lead_time
+            obs_point = observations.sel(
+                latitude=lat,
+                longitude=lon,
+                time=valid_time
+            )[var].load()
+            pred_array = preds_point.values
+            obs_array = obs_point.values
 
-                    valid_time = preds_point.time + lead_time
+            pc_val = pc(pred_array, obs_array)
+            pcs_val = pcs(pred_array, obs_array)
+            tw_pc_val = tw_pc(pred_array, obs_array, t)
+            tw_pcs_val = tw_pcs(pred_array, obs_array, t)
+            qw_pc_val = qw_pc(pred_array, obs_array, q)
+            qw_pcs_val = qw_pcs(pred_array, obs_array, q)
 
-                    obs_point = observations.sel(
-                        latitude=lat,
-                        longitude=lon,
-                        time=valid_time
-                    )[var].load()
+        except Exception as e:
+            print(f"Failed for lat={lat}, lon={lon}: {e}")
+            pc_val = pcs_val = tw_pc_val = tw_pcs_val = qw_pc_val = qw_pcs_val = np.nan
 
-                    pred_array = preds_point.values
-                    obs_array = obs_point.values
-
-                    # Standard
-                    pc_val = pc(pred_array, obs_array)
-                    pcs_val = pcs(pred_array, obs_array)
-                    # Threshold-weighted
-                    tw_pc_val = tw_pc(pred_array, obs_array, t)
-                    tw_pcs_val = tw_pcs(pred_array, obs_array, t)
-                    # Quantile-weighted
-                    qw_pc_val = qw_pc(pred_array, obs_array, q)
-                    qw_pcs_val = qw_pcs(pred_array, obs_array, q)
-
-                except Exception as e:
-                    print(f"Failed for {var} {lat} {lon}: {e}")
-                    pc_val = pcs_val = tw_pc_val = tw_pcs_val = qw_pc_val = qw_pcs_val = np.nan
-
-                results.append({
-                    'lat': float(lat),
-                    'lon': float(lon),
-                    'variable': var,
-                    'lead_time': int(lead_time / np.timedelta64(1, 'D')),  # days as int
-                    'pc': pc_val,
-                    'pcs': pcs_val,
-                    'tw_pc': tw_pc_val,
-                    'tw_pcs': tw_pcs_val,
-                    'qw_pc': qw_pc_val,
-                    'qw_pcs': qw_pcs_val
-                })
-    percent = int(100 * var_counter / total_vars)
-    print(f"\n{var} {var_counter}/{total_vars} ({percent}%) complete.\n")
+        results.append({
+            'lat': float(lat),
+            'lon': float(lon),
+            'variable': var,
+            'lead_time': int(lead_time / np.timedelta64(1, 'D')),  # days as int
+            'pc': pc_val,
+            'pcs': pcs_val,
+            'tw_pc': tw_pc_val,
+            'tw_pcs': tw_pcs_val,
+            'qw_pc': qw_pc_val,
+            'qw_pcs': qw_pcs_val
+        })
 
 df = pd.DataFrame(results)
-print(df.head())
+print(df)
 
 
 '''

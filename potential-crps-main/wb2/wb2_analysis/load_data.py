@@ -77,14 +77,4 @@ for name, path in forecast_paths.items():
     with ProgressBar():
         ds.to_zarr(save_path + f'{name}_64x32.zarr', mode='w', consolidated=True)      
 
-# computing scores ----------------------------------------------------  
 
-forecasts = xr.open_zarr(
-        store='data/graphcast_64x32.zarr',
-        decode_timedelta=True
-        )
-
-observations = xr.open_zarr(
-        store='data/era5_64x32.zarr',
-        decode_timedelta=True
-        )

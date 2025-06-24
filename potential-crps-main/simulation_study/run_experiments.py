@@ -89,13 +89,9 @@ def tw_crps(self, obs, t):
     T = [t] * len(y)   
     return list(map(tw_crps0, y, p, w, x, T))
 
-
 def qw_crps(self, obs, q=0.9):
-
     predictions = self.predictions
     y = np.array(obs)
-    J = 199
-
     if y.ndim > 1:
         raise ValueError("obs must be a 1-D array")
     if np.isnan(np.sum(y)):
@@ -103,32 +99,27 @@ def qw_crps(self, obs, q=0.9):
     if y.size != 1 and len(y) != len(predictions):
         raise ValueError("obs must have length 1 or the same length as predictions")
 
-    alphas = np.arange(1, J) / J  # j/J, j=1,...,J-1
-    weights = (alphas > q).astype(float)
-    qf = self.qpred(alphas)  # shape (n_samples, J-1)
-    def qw_crps_single(y_i, qf_i):
-        pinball = 2 * ((y_i < qf_i).astype(float) - alphas) * (qf_i - y_i)
-        return np.sum(weights * pinball) / (J - 1)
-    
-    return [qw_crps_single(y[i], qf[i, :]) for i in range(len(y))]
+    def get_points(pred):
+        return np.array(pred.points)
+    def get_cdf(pred):
+        return np.array(pred.ecdf)
+    def get_weights(cdf):
+        return np.hstack([cdf[0], np.diff(cdf)])
 
-    
-    
+    def qw_crps0(y, p, w, x, q):
+        c_cum = np.cumsum(w)
+        c_cum_prev = np.hstack(([0], c_cum[:-1]))
+        c_cum_star = np.maximum(c_cum, q)
+        c_cum_prev_star = np.maximum(c_cum_prev, q)
+        indicator = (x >= y).astype(float)
+        terms = indicator * (c_cum_star - c_cum_prev_star) - 0.5 * (c_cum_star**2 - c_cum_prev_star**2)
+        return 2 * np.sum(terms * (x - y))
 
-def qw_crps_approx(self, obs, q=0.9):
-    
-    q_levels = np.linspace(0.005, 0.995, 199)
-    y = np.array(obs)
-    qf = self.qpred(q_levels)
-    weights = (q_levels > q).astype(float)
-    d_alpha = q_levels[1] - q_levels[0] 
-
-    def qw_crps_approx_single(y_i, qf_i):
-        indicator = (qf_i >= y_i).astype(float)
-        return 2 * np.sum(weights * (indicator - q_levels) * (qf_i - y_i) * d_alpha)
-
-    return [qw_crps_approx_single(y[i], qf[i, :]) for i in range(len(y))]
-
+    x = list(map(get_points, predictions))
+    p = list(map(get_cdf, predictions))
+    w = list(map(get_weights, p))
+    Q = [q] * len(y)
+    return list(map(qw_crps0, y, p, w, x, Q))
 
 def tw_pc(pred, y, t): 
     fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
@@ -147,15 +138,6 @@ def qw_pc(pred, y, q=0.9):
     type(prob_pred).qw_crps = qw_crps
     qwcrps_scores = prob_pred.qw_crps(y, q=q)
     return np.mean(qwcrps_scores)
-
-def qw_pc_approx(pred, y, q=0.9):
-    
-    fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
-    prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
-    type(prob_pred).qw_crps_approx = qw_crps_approx 
-    qwcrps_scores = prob_pred.qw_crps_approx(y, q=q)
-    return np.mean(qwcrps_scores)
-
 
 
 def my_crps(x, cum_weights, y):
@@ -188,26 +170,7 @@ def tw_pcs(pred, y, t):
     pc_model = tw_pc(pred, y, t)
 
     pcs = (pc_ref - pc_model) / pc_ref
-    '''
-    # slow version of pcs, which uses the climatological forecast (to be copied to qw_pcs)
-    def climatological_tw_pc(y, t):
-        """
-        Compute PCRPS using a climatological forecast: fit IDR on y, predict same pooled ECDF for all y.
-        This avoids overfitting and returns the proper CRPS reference value.
-        """
-        x_dummy = np.zeros_like(y)  # All predictors the same → 1 pooled distribution
-        fitted_idr = idr(y, pd.DataFrame({'x': x_dummy}))
-        prob_pred = fitted_idr.predict(pd.DataFrame({'x': x_dummy}))
-
-        type(prob_pred).tw_crps = tw_crps # monkey-patch 
-
-        tw_crps_scores = prob_pred.tw_crps(y, t)
-        mean_tw_crps = np.mean(tw_crps_scores)
-        return mean_tw_crps
-
-    slow_pcs = (climatological_tw_pc(y, t) - pc_model) / climatological_tw_pc(y, t)
-    print("fast_pcs: ", pcs, "slow_pcs: ", slow_pcs)
-    '''
+    
     return pcs
 
 def qw_pcs(pred, y, q):
@@ -396,7 +359,7 @@ def test_of_new_functions():
     print("Absolute difference:", abs(pc_val - tw_pc_val))
 
     # Compute quantile-weighted CRPS
-    lowest_q = 0.001
+    lowest_q = 0.0000001
     qw_pc_val = qw_pc(fcst, y, q=lowest_q)
 
     print(f"qw_PC (quantiles > {lowest_q}):", qw_pc_val)
@@ -479,18 +442,58 @@ def tw_crps_masked(self, obs, t):
 
 
 def pc0(y):
-    """
-    Compute PC^(0) = (1/(2*n^2)) * \sum_{i,j} |y[i] - y[j]| using a sorted-based O(n log n) approach for a 1D array y.
-
-    Parameters:
-        y (1D array-like): Observations or values along time.
-
-    Returns:
-        float: The computed PC^(0) value.
-    """
     n = len(y)
     y_sorted = np.sort(y)
     ranks = np.arange(1, n + 1)          
     weights = 2 * ranks - n - 1  
 
     return np.sum(weights * y_sorted) / (n**2)
+
+def qw_pc_approx(pred, y, q=0.9):
+    
+    fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
+    prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
+    type(prob_pred).qw_crps_approx = qw_crps_approx 
+    qwcrps_scores = prob_pred.qw_crps_approx(y, q=q)
+    return np.mean(qwcrps_scores)
+
+
+def qw_crps_approx_paper (self, obs, q=0.9):
+
+    predictions = self.predictions
+    y = np.array(obs)
+    J = 1999
+
+    if y.ndim > 1:
+        raise ValueError("obs must be a 1-D array")
+    if np.isnan(np.sum(y)):
+        raise ValueError("obs contains nan values")
+    if y.size != 1 and len(y) != len(predictions):
+        raise ValueError("obs must have length 1 or the same length as predictions")
+
+    alphas = np.arange(1, J) / J  # j/J, j=1,...,J-1
+    weights = (alphas > q).astype(float)
+    qf = self.qpred(alphas)  # shape (n_samples, J-1)
+    def qw_crps_single(y_i, qf_i):
+        pinball = 2 * ((y_i < qf_i).astype(float) - alphas) * (qf_i - y_i)
+        return np.sum(weights * pinball) / (J - 1)
+    
+    return [qw_crps_single(y[i], qf[i, :]) for i in range(len(y))]
+
+    
+    
+
+def qw_crps_approx(self, obs, q=0.9):
+    
+    q_levels = np.linspace(0.005, 0.995, 199)
+    y = np.array(obs)
+    qf = self.qpred(q_levels)
+    weights = (q_levels > q).astype(float)
+    d_alpha = q_levels[1] - q_levels[0] 
+
+    def qw_crps_approx_single(y_i, qf_i):
+        indicator = (qf_i >= y_i).astype(float)
+        return 2 * np.sum(weights * (indicator - q_levels) * (qf_i - y_i) * d_alpha)
+
+    return [qw_crps_approx_single(y[i], qf[i, :]) for i in range(len(y))]
+
