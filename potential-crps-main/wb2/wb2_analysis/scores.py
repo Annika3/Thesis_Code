@@ -4,16 +4,31 @@ import xarray as xr
 from dask.diagnostics import ProgressBar
 from isodisreg import idr
 import os
+import pickle
+from joblib import Parallel, delayed
 
 # get data  ----------------------------------------------------  
 
+model_names = ['graphcast', 'pangu', 'hres'] #for ERA5 comparison
+
+forecast_ds = {}
+for model in model_names:
+    forecast_path = f'data/{model}_64x32.zarr'
+    if not os.path.exists(forecast_path):
+        print(f"Forecast file {forecast_path} not found, skipping!")
+        continue
+    forecast_ds[model] = xr.open_zarr(forecast_path, decode_timedelta=True)
+
+"""
 forecasts = xr.open_zarr(
         store='data/graphcast_64x32.zarr',
         decode_timedelta=True
         )
+"""
 
 observations = xr.open_zarr(
-        store='data/era5_64x32.zarr',
+        store='data/era5_64x32.zarr', # ERA5 
+        # store ='data/ifs_analysis_64x32.zarr', #IFS 
         decode_timedelta=True
         )
 
@@ -166,8 +181,8 @@ def qw_pcs(pred, y, q):
 
 # (re-) define variables to loop over (to be linked to load_data file)   ----------------------------------------------------  
 
-lats = forecasts.latitude.values
-lons = forecasts.longitude.values
+lats = observations.latitude.values
+lons = observations.longitude.values
 
 lead_times = [
     np.timedelta64(1, 'D'),
@@ -192,60 +207,74 @@ time_range = slice('2020-01-01','2020-12-31')
 var = '2m_temperature' # dummy run to see duration of the loop
 
 q = 0.9
-# compute t 
-# all_obs = observations[var].sel(time=time_range).values.flatten()
-# t = np.quantile(all_obs, 0.5)
-# print("Global 0.5 quantile threshold (t) is:", t)
 
-t = 1 # dummy value for t, replace with actual quantile computation if needed
+# t = 1 # dummy value for t, replace with actual quantile computation if needed
 
 
 results = []
 for i, lat in enumerate(lats):
     print(f"Processing lat {i+1}/{len(lats)}")
     for lon in lons:
-        try:
-            preds_point = forecasts.sel(
-                prediction_timedelta=lead_time,
-                latitude=lat,
-                longitude=lon,
-                method='nearest'
-            ).sel(time=time_range)[var].load()
-            valid_time = preds_point.time + lead_time
-            obs_point = observations.sel(
-                latitude=lat,
-                longitude=lon,
-                time=valid_time
-            )[var].load()
-            pred_array = preds_point.values
-            obs_array = obs_point.values
+        for model in model_names:
+            try:
+                forecasts = forecast_ds[model]
+                preds_point = forecasts.sel(
+                    prediction_timedelta=lead_time,
+                    latitude=lat,
+                    longitude=lon,
+                    method='nearest'
+                ).sel(time=time_range)[var].load()
+                valid_time = preds_point.time + lead_time
+                obs_point = observations.sel(
+                    latitude=lat,
+                    longitude=lon,
+                    time=valid_time
+                )[var].load()
+                pred_array = preds_point.values
+                obs_array = obs_point.values
 
-            pc_val = pc(pred_array, obs_array)
-            pcs_val = pcs(pred_array, obs_array)
-            tw_pc_val = tw_pc(pred_array, obs_array, t)
-            tw_pcs_val = tw_pcs(pred_array, obs_array, t)
-            qw_pc_val = qw_pc(pred_array, obs_array, q)
-            qw_pcs_val = qw_pcs(pred_array, obs_array, q)
+                t = np.nanquantile(obs_array, 0.9)
 
-        except Exception as e:
-            print(f"Failed for lat={lat}, lon={lon}: {e}")
-            pc_val = pcs_val = tw_pc_val = tw_pcs_val = qw_pc_val = qw_pcs_val = np.nan
+                pc_val = pc(pred_array, obs_array)
+                pcs_val = pcs(pred_array, obs_array)
+                tw_pc_val = tw_pc(pred_array, obs_array, t)
+                tw_pcs_val = tw_pcs(pred_array, obs_array, t)
+                qw_pc_val = qw_pc(pred_array, obs_array, q)
+                qw_pcs_val = qw_pcs(pred_array, obs_array, q)
 
-        results.append({
-            'lat': float(lat),
-            'lon': float(lon),
-            'variable': var,
-            'lead_time': int(lead_time / np.timedelta64(1, 'D')),  # days as int
-            'pc': pc_val,
-            'pcs': pcs_val,
-            'tw_pc': tw_pc_val,
-            'tw_pcs': tw_pcs_val,
-            'qw_pc': qw_pc_val,
-            'qw_pcs': qw_pcs_val
-        })
+            except Exception as e:
+                print(f"Failed for model={model}, lat={lat}, lon={lon}: {e}")
+                pc_val = pcs_val = tw_pc_val = tw_pcs_val = qw_pc_val = qw_pcs_val = np.nan
+
+            results.append({
+                'model': model,
+                'lat': float(lat),
+                'lon': float(lon),
+                'variable': var,
+                'lead_time': int(lead_time / np.timedelta64(1, 'D')),  # days as int
+                'pc': pc_val,
+                'pcs': pcs_val,
+                'tw_pc': tw_pc_val,
+                'tw_pcs': tw_pcs_val,
+                'qw_pc': qw_pc_val,
+                'qw_pcs': qw_pcs_val
+            })
+
+## Saving/ Showing results ----------------------------------------------------
 
 df = pd.DataFrame(results)
 print(df)
+
+# Save as CSV 
+csv_name = f'results_comparemodels_{var}_lead{int(lead_time / np.timedelta64(1, "D"))}d.csv'
+df.to_csv(csv_name, index=False)
+print(f"Results saved to {csv_name}")
+
+# Save as pickle
+pkl_name = f'results_comparemodels_{var}_lead{int(lead_time / np.timedelta64(1, "D"))}d.pkl'
+with open(pkl_name, 'wb') as f:
+    pickle.dump(df, f)
+print(f"Pickle saved to {pkl_name}")
 
 
 '''
