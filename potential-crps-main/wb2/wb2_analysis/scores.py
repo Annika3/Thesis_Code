@@ -210,55 +210,61 @@ q = 0.9
 
 # t = 1 # dummy value for t, replace with actual quantile computation if needed
 
+def compute_metrics(model, lat, lon, lead_time, time_range, var, q, forecast_ds, observations):
+    try:
+        forecasts = forecast_ds[model]
+        preds_point = forecasts.sel(
+            prediction_timedelta=lead_time,
+            latitude=lat,
+            longitude=lon,
+            method='nearest'
+        ).sel(time=time_range)[var].load()
+        valid_time = preds_point.time + lead_time
+        obs_point = observations.sel(
+            latitude=lat,
+            longitude=lon,
+            time=valid_time
+        )[var].load()
+        pred_array = preds_point.values
+        obs_array = obs_point.values
 
-results = []
+        t = np.nanquantile(obs_array, 0.9)
+
+        pc_val = pc(pred_array, obs_array)
+        pcs_val = pcs(pred_array, obs_array)
+        tw_pc_val = tw_pc(pred_array, obs_array, t)
+        tw_pcs_val = tw_pcs(pred_array, obs_array, t)
+        qw_pc_val = qw_pc(pred_array, obs_array, q)
+        qw_pcs_val = qw_pcs(pred_array, obs_array, q)
+    except Exception as e:
+        print(f"Failed for model={model}, lat={lat}, lon={lon}: {e}")
+        pc_val = pcs_val = tw_pc_val = tw_pcs_val = qw_pc_val = qw_pcs_val = np.nan
+
+    return {
+        'model': model,
+        'lat': float(lat),
+        'lon': float(lon),
+        'variable': var,
+        'lead_time': int(lead_time / np.timedelta64(1, 'D')),  # days as int
+        'pc': pc_val,
+        'pcs': pcs_val,
+        'tw_pc': tw_pc_val,
+        'tw_pcs': tw_pcs_val,
+        'qw_pc': qw_pc_val,
+        'qw_pcs': qw_pcs_val
+    }
+
+tasks = []
 for i, lat in enumerate(lats):
-    print(f"Processing lat {i+1}/{len(lats)}")
     for lon in lons:
         for model in model_names:
-            try:
-                forecasts = forecast_ds[model]
-                preds_point = forecasts.sel(
-                    prediction_timedelta=lead_time,
-                    latitude=lat,
-                    longitude=lon,
-                    method='nearest'
-                ).sel(time=time_range)[var].load()
-                valid_time = preds_point.time + lead_time
-                obs_point = observations.sel(
-                    latitude=lat,
-                    longitude=lon,
-                    time=valid_time
-                )[var].load()
-                pred_array = preds_point.values
-                obs_array = obs_point.values
+            tasks.append((model, lat, lon, lead_time, time_range, var, q, forecast_ds, observations))
 
-                t = np.nanquantile(obs_array, 0.9)
 
-                pc_val = pc(pred_array, obs_array)
-                pcs_val = pcs(pred_array, obs_array)
-                tw_pc_val = tw_pc(pred_array, obs_array, t)
-                tw_pcs_val = tw_pcs(pred_array, obs_array, t)
-                qw_pc_val = qw_pc(pred_array, obs_array, q)
-                qw_pcs_val = qw_pcs(pred_array, obs_array, q)
-
-            except Exception as e:
-                print(f"Failed for model={model}, lat={lat}, lon={lon}: {e}")
-                pc_val = pcs_val = tw_pc_val = tw_pcs_val = qw_pc_val = qw_pcs_val = np.nan
-
-            results.append({
-                'model': model,
-                'lat': float(lat),
-                'lon': float(lon),
-                'variable': var,
-                'lead_time': int(lead_time / np.timedelta64(1, 'D')),  # days as int
-                'pc': pc_val,
-                'pcs': pcs_val,
-                'tw_pc': tw_pc_val,
-                'tw_pcs': tw_pcs_val,
-                'qw_pc': qw_pc_val,
-                'qw_pcs': qw_pcs_val
-            })
+n_jobs = 5   
+results = Parallel(n_jobs=n_jobs, backend='loky', verbose=10)(
+    delayed(compute_metrics)(*task) for task in tasks
+)
 
 ## Saving/ Showing results ----------------------------------------------------
 
