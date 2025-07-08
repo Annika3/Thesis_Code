@@ -13,9 +13,8 @@ import os
 from isodisreg import idr       # to compute isotonic regression fit
 import urocc                    # to compute CPA
 
-# import scoringrules as sr
-
-save_plots = 'plots/'
+BASE_DIR   = os.path.dirname(os.path.dirname(__file__))          # one level up
+save_plots = os.path.join(BASE_DIR, 'simulation_study', 'plots')
 
 # define possible error measures ----------------------------------------------------
 
@@ -225,7 +224,7 @@ def run_simulation_example_1(n=1000, square_y=False):
         y = pred_data['y']**2
         add_name = '_squared'
 
-    loss_fcts = {'RMSE': rmse, 'MAE': mae, 'QL90': ql90, 'PC': pc, 'ACC': acc, 'CPA': cpa, 'PCS': pcs, 'tw_PC': lambda pred, y: tw_pc(pred, y, t=24), 'tw_PCS': lambda pred, y: tw_pcs(pred, y, t=24), 'qw_PC_appr': lambda pred, y: qw_pc_approx(pred, y, q=0.9), 'qw_PC': lambda pred, y: qw_pc(pred, y, q=0.9)}
+    loss_fcts = {'RMSE': rmse, 'MAE': mae, 'QL90': ql90, 'PC': pc, 'ACC': acc, 'CPA': cpa, 'PCS': pcs, 'tw_PC': lambda pred, y: tw_pc(pred, y, t=24), 'tw_PCS': lambda pred, y: tw_pcs(pred, y, t=24), 'qw_PC': lambda pred, y: qw_pc(pred, y, q=0.9), 'qw_PCS': lambda pred, y: qw_pcs(pred, y, q=0.9)}
 
     fcsts = pred_data.columns[pred_data.columns != 'y']
     loss_vals = np.zeros((len(fcsts), len(loss_fcts)))

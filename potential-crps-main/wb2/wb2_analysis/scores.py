@@ -9,8 +9,9 @@ from joblib import Parallel, delayed
 
 # get data  ----------------------------------------------------  
 
-model_names = ['graphcast', 'pangu', 'hres'] #for ERA5 comparison
-
+# model_names = ['graphcast', 'pangu', 'hres'] #for ERA5 comparison
+# model_names = [ 'pangu_operational', 'graphcast_operational', 'hres'] #for IFS comparison
+"""
 forecast_ds = {}
 for model in model_names:
     forecast_path = f'data/{model}_64x32.zarr'
@@ -19,19 +20,19 @@ for model in model_names:
         continue
     forecast_ds[model] = xr.open_zarr(forecast_path, decode_timedelta=True)
 
-"""
+
 forecasts = xr.open_zarr(
         store='data/graphcast_64x32.zarr',
         decode_timedelta=True
         )
-"""
+
 
 observations = xr.open_zarr(
-        store='data/era5_64x32.zarr', # ERA5 
-        # store ='data/ifs_analysis_64x32.zarr', #IFS 
+        # store='data/era5_64x32.zarr', # ERA5 
+        store ='data/ifs_analysis_64x32.zarr', #IFS 
         decode_timedelta=True
         )
-
+"""
 '''
 # check for shape/ names of variables/ dataset
 ds = xr.open_zarr('data/era5_64x32.zarr', consolidated=True)
@@ -152,8 +153,6 @@ def qw_pc(pred, y, q=0.9):
     return np.mean(qwcrps_scores)
 
 
-
-
 def qw_pcs(pred, y, q):
 
     pc_model = qw_pc(pred, y, q)
@@ -161,7 +160,7 @@ def qw_pcs(pred, y, q):
     def climatological_qw_pc(y, q):
         """
         Compute PCRPS using a climatological forecast: fit IDR on y, predict same pooled ECDF for all y.
-        This avoids overfitting and returns the proper CRPS reference value.
+        (This avoids overfitting)
         """
         x_dummy = np.zeros_like(y)  # All predictors the same -> 1 pooled distribution
         fitted_idr = idr(y, pd.DataFrame({'x': x_dummy}))
@@ -169,7 +168,7 @@ def qw_pcs(pred, y, q):
 
         type(prob_pred).qw_crps = qw_crps # monkey-patch 
 
-        qw_crps_scores = prob_pred.tw_crps(y, q)
+        qw_crps_scores = prob_pred.qw_crps(y, q)
         mean_qw_crps = np.mean(qw_crps_scores)
         return mean_qw_crps
     pc_ref = climatological_qw_pc(y, q)
@@ -181,8 +180,9 @@ def qw_pcs(pred, y, q):
 
 # (re-) define variables to loop over (to be linked to load_data file)   ----------------------------------------------------  
 
-lats = observations.latitude.values
-lons = observations.longitude.values
+# lats = observations.latitude.values
+# lons = observations.longitude.values
+
 
 lead_times = [
     np.timedelta64(1, 'D'),
@@ -199,89 +199,168 @@ variables = [
     ]
 total_vars = len(variables)
 var_counter = 0
-# ka_lat = 49.00937
-# ka_lon = 8.40444
-lead_time = np.timedelta64(3, 'D')
+# lead_time = np.timedelta64(3, 'D')
 time_range = slice('2020-01-01','2020-12-31')
 
-var = '2m_temperature' # dummy run to see duration of the loop
+# var = 'mean_sea_level_pressure' # fixed variable for now, can be looped over later
 
 q = 0.9
 
-# t = 1 # dummy value for t, replace with actual quantile computation if needed
+# ----------------------------------------------------
+#  Metric helper
+# ----------------------------------------------------
 
 def compute_metrics(model, lat, lon, lead_time, time_range, var, q, forecast_ds, observations):
     try:
-        forecasts = forecast_ds[model]
-        preds_point = forecasts.sel(
+        preds = forecast_ds[model].sel(
             prediction_timedelta=lead_time,
             latitude=lat,
             longitude=lon,
-            method='nearest'
+            method="nearest",
         ).sel(time=time_range)[var].load()
-        valid_time = preds_point.time + lead_time
-        obs_point = observations.sel(
+
+        obs = observations.sel(
             latitude=lat,
             longitude=lon,
-            time=valid_time
+            time=preds.time + lead_time,
         )[var].load()
-        pred_array = preds_point.values
-        obs_array = obs_point.values
 
-        t = np.nanquantile(obs_array, 0.9)
+        pred_arr = preds.values
+        obs_arr = obs.values
+        if pred_arr.size == 0 or obs_arr.size == 0:
+            raise ValueError("Empty series")
 
-        pc_val = pc(pred_array, obs_array)
-        pcs_val = pcs(pred_array, obs_array)
-        tw_pc_val = tw_pc(pred_array, obs_array, t)
-        tw_pcs_val = tw_pcs(pred_array, obs_array, t)
-        qw_pc_val = qw_pc(pred_array, obs_array, q)
-        qw_pcs_val = qw_pcs(pred_array, obs_array, q)
+        t = np.nanquantile(obs_arr, 0.9)
+
+        return {
+            "model": model,
+            "lat": float(lat),
+            "lon": float(lon),
+            "variable": var,
+            "lead_time": int(lead_time / np.timedelta64(1, "D")),
+            "pc": pc(pred_arr, obs_arr),
+            "pcs": pcs(pred_arr, obs_arr),
+            "tw_pc": tw_pc(pred_arr, obs_arr, t),
+            "tw_pcs": tw_pcs(pred_arr, obs_arr, t),
+            "qw_pc": qw_pc(pred_arr, obs_arr, q),
+            "qw_pcs": qw_pcs(pred_arr, obs_arr, q),
+        }
     except Exception as e:
-        print(f"Failed for model={model}, lat={lat}, lon={lon}: {e}")
-        pc_val = pcs_val = tw_pc_val = tw_pcs_val = qw_pc_val = qw_pcs_val = np.nan
+        print(f"Failed metric at ({lat},{lon}) for {model}/{var}: {e}")
+        return {k: np.nan for k in [
+            "model", "lat", "lon", "variable", "lead_time", "pc", "pcs",
+            "tw_pc", "tw_pcs", "qw_pc", "qw_pcs"]}
 
-    return {
-        'model': model,
-        'lat': float(lat),
-        'lon': float(lon),
-        'variable': var,
-        'lead_time': int(lead_time / np.timedelta64(1, 'D')),  # days as int
-        'pc': pc_val,
-        'pcs': pcs_val,
-        'tw_pc': tw_pc_val,
-        'tw_pcs': tw_pcs_val,
-        'qw_pc': qw_pc_val,
-        'qw_pcs': qw_pcs_val
+# ----------------------------------------------------
+#  CONFIGURATION  (structure wie zuvor – aber nur IFS)
+# ----------------------------------------------------
+
+obs_sources = {
+    "ifs": {
+        "path": "data/ifs_analysis_64x32.zarr",
+        "models": ["pangu_operational", "graphcast_operational", "hres"],
     }
+}
 
-tasks = []
-for i, lat in enumerate(lats):
-    for lon in lons:
-        for model in model_names:
-            tasks.append((model, lat, lon, lead_time, time_range, var, q, forecast_ds, observations))
+variables = [
+    "2m_temperature",
+    "mean_sea_level_pressure",
+    "10m_wind_speed",
+]
+
+lead_time = np.timedelta64(7, "D")
+time_range = slice("2020-01-01", "2020-12-31")
+q = 0.9
+n_jobs = 5
+
+# ----------------------------------------------------
+#  MAIN WORK – gleiche Struktur wie zuvor (ohne __main__‑Guard)
+# ----------------------------------------------------
+
+for obs_name, obs_info in obs_sources.items():
+    print(f"\nProcessing {obs_name.upper()} observations…")
+    obs_path = obs_info["path"]
+    model_names = obs_info["models"]
+
+    # Load observations
+    observations = xr.open_zarr(obs_path, decode_timedelta=True)
+
+    # Load forecasts
+    forecast_ds = {}
+    for mdl in model_names:
+        f_path = f"data/{mdl}_64x32.zarr"
+        if not os.path.exists(f_path):
+            print(f"⚠️  Missing forecast file {f_path} – skip {mdl}")
+            continue
+        forecast_ds[mdl] = xr.open_zarr(f_path, decode_timedelta=True)
+
+    # Grid coordinates
+    lats = observations.latitude.values
+    lons = observations.longitude.values
+
+    # Directory for results
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    save_dir = os.path.join(script_dir, "score_data")
+    os.makedirs(save_dir, exist_ok=True)
+
+    # ---- iterate over variables -------------------------------------------
+    for var in variables:
+        print(f"  → variable: {var}")
+        tasks = []
+        for lat in lats:
+            for lon in lons:
+                for mdl in model_names:
+                    if mdl not in forecast_ds:
+                        continue
+                    tasks.append((mdl, lat, lon, lead_time, time_range, var, q, forecast_ds, observations))
+
+        # Parallel computation
+        results = Parallel(n_jobs=n_jobs, backend="loky", verbose=10)(
+            delayed(compute_metrics)(*t) for t in tasks
+        )
+
+        # Save
+        df = pd.DataFrame(results)
+        lead_days = int(lead_time / np.timedelta64(1, "D"))
+        csv_name = f"{var}_lead{lead_days}d_{obs_name}.csv"
+        pkl_name = csv_name.replace(".csv", ".pkl")
+        csv_path = os.path.join(save_dir, csv_name)
+        pkl_path = os.path.join(save_dir, pkl_name)
+        df.to_csv(csv_path, index=False)
+        with open(pkl_path, "wb") as f:
+            pickle.dump(df, f)
+        print(f"    • saved → {csv_path}")
 
 
-n_jobs = 5   
+"""
 results = Parallel(n_jobs=n_jobs, backend='loky', verbose=10)(
     delayed(compute_metrics)(*task) for task in tasks
 )
-
+"""
 ## Saving/ Showing results ----------------------------------------------------
-
+"""""
 df = pd.DataFrame(results)
 print(df)
 
-# Save as CSV 
-csv_name = f'results_comparemodels_{var}_lead{int(lead_time / np.timedelta64(1, "D"))}d.csv'
-df.to_csv(csv_name, index=False)
-print(f"Results saved to {csv_name}")
+script_dir = os.path.dirname(os.path.abspath(__file__))
+save_dir = os.path.join(script_dir, 'score_data')
 
-# Save as pickle
-pkl_name = f'results_comparemodels_{var}_lead{int(lead_time / np.timedelta64(1, "D"))}d.pkl'
-with open(pkl_name, 'wb') as f:
+obs_name = 'ifs'
+
+csv_name = f'{var}_lead{int(lead_time / np.timedelta64(1, "D"))}d_{obs_name}.csv'
+pkl_name = f'{var}_lead{int(lead_time / np.timedelta64(1, "D"))}d_{obs_name}.pkl'
+
+csv_path = os.path.join(save_dir, csv_name)
+pkl_path = os.path.join(save_dir, pkl_name)
+
+df.to_csv(csv_path, index=False)
+print(f"Results saved to {csv_path}")
+
+with open(pkl_path, 'wb') as f:
     pickle.dump(df, f)
-print(f"Pickle saved to {pkl_name}")
+print(f"Pickle saved to {pkl_path}")
 
+"""
 
 '''
 preds_point = forecasts.sel(prediction_timedelta=lead_time, latitude=ka_lat, longitude=ka_lon, method='nearest').sel(time=time_range)[var].load()
