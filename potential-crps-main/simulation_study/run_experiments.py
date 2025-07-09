@@ -88,7 +88,16 @@ def tw_crps(self, obs, t):
     T = [t] * len(y)   
     return list(map(tw_crps0, y, p, w, x, T))
 
-def qw_crps(self, obs, q=0.9):
+def qw_crps0(y, p, w, x, q):
+        c_cum = np.cumsum(w)
+        c_cum_prev = np.hstack(([0], c_cum[:-1]))
+        c_cum_star = np.maximum(c_cum, q)
+        c_cum_prev_star = np.maximum(c_cum_prev, q)
+        indicator = (x >= y).astype(float)
+        terms = indicator * (c_cum_star - c_cum_prev_star) - 0.5 * (c_cum_star**2 - c_cum_prev_star**2)
+        return 2 * np.sum(terms * (x - y))
+
+def qw_crps(self, obs, q):
     predictions = self.predictions
     y = np.array(obs)
     if y.ndim > 1:
@@ -105,14 +114,6 @@ def qw_crps(self, obs, q=0.9):
     def get_weights(cdf):
         return np.hstack([cdf[0], np.diff(cdf)])
 
-    def qw_crps0(y, p, w, x, q):
-        c_cum = np.cumsum(w)
-        c_cum_prev = np.hstack(([0], c_cum[:-1]))
-        c_cum_star = np.maximum(c_cum, q)
-        c_cum_prev_star = np.maximum(c_cum_prev, q)
-        indicator = (x >= y).astype(float)
-        terms = indicator * (c_cum_star - c_cum_prev_star) - 0.5 * (c_cum_star**2 - c_cum_prev_star**2)
-        return 2 * np.sum(terms * (x - y))
 
     x = list(map(get_points, predictions))
     p = list(map(get_cdf, predictions))

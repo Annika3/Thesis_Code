@@ -147,3 +147,13 @@ weatherbench2/
 
 # ignore results directory
 wb2/results/
+
+# ignore data directory
+data/
+
+# Ignore large binary-like or auto-generated output
+*.zarr/
+data/
+*.nc
+*.pkl
+*.csv
