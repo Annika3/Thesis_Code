@@ -171,10 +171,10 @@ def climatological_qw_pc(y, q):
 def qw_pcs(qw_pc_val, y, q):
 
     # pc_model = qw_pc(prob_pred, y, q)
-    pc_ref = qw_pc0(y, q)
-    pc_climatological = climatological_qw_pc(y, q)
-    diff = pc_ref - pc_climatological
-    print ("difference in pc_crps0 and pc_climatological: ", diff)
+    # pc_faster = qw_pc0(y, q)
+    pc_ref = climatological_qw_pc(y, q)
+    # diff = pc_ref - pc_faster
+    # print ("difference in pc_crps0 and pc_climatological: ", diff)
 
     pcs = (pc_ref - qw_pc_val) / pc_ref   
     return pcs
@@ -188,25 +188,20 @@ lead_times = [
     np.timedelta64(10, 'D')
     ]
 
-variables = [
-    '2m_temperature',
-    'mean_sea_level_pressure',
-    '10m_wind_speed',
-    ]
-total_vars = len(variables)
-var_counter = 0
-# lead_time = np.timedelta64(3, 'D')
-time_range = slice('2020-01-01','2020-12-31')
 
 t_quantiles = [0.9, 0.95, 0.99]
 q_values = [0.9, 0.95, 0.99]
+
+# t_quantiles = [0.9]
+# q_values = [0.9]
 
 # ----------------------------------------------------
 #  Metrics
 # ----------------------------------------------------
 
-def compute_metrics(model, lat, lon, lead_time, time_range, var, t_quantile, q_value, forecast_ds, observations):
+def compute_metrics(model, lat, lon, lead_time, time_range, var, t_quantiles, q_values, forecast_ds, observations):
     try:
+        # Lade Vorhersagen und Beobachtungen
         preds = forecast_ds[model].sel(
             prediction_timedelta=lead_time,
             latitude=lat,
@@ -222,42 +217,80 @@ def compute_metrics(model, lat, lon, lead_time, time_range, var, t_quantile, q_v
 
         pred_arr = preds.values
         obs_arr = obs.values
+
         if pred_arr.size == 0 or obs_arr.size == 0:
             raise ValueError("Empty series")
-        
-        fitted_idr = idr(obs_arr,pd.DataFrame({"x": pred_arr},columns=["x"]))
-        prob_pred = fitted_idr.predict(pd.DataFrame({"x":pred_arr},columns=["x"]))
 
-        t = np.nanquantile(obs_arr, t_quantile)
+        # IDR einmal fitten & Vorhersage
+        fitted_idr = idr(obs_arr, pd.DataFrame({"x": pred_arr}))
+        prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred_arr}))
 
-       # Compute PC values only once
+        # Basiswerte berechnen
         pc_val = pc(prob_pred, obs_arr)
-        tw_pc_val = tw_pc(prob_pred, obs_arr, t)
-        qw_pc_val = qw_pc(prob_pred, obs_arr, q_value)
+        pcs_val = pcs(pc_val, obs_arr)
 
-        return {
+        base = {
             "model": model,
             "lat": float(lat),
             "lon": float(lon),
             "variable": var,
             "lead_time": int(lead_time / np.timedelta64(1, "D")),
-            "t_quantile": t_quantile,
-            "q_value": q_value,
             "pc": pc_val,
-            "pcs": pcs(pc_val, obs_arr),
-            "tw_pc": tw_pc_val,
-            "tw_pcs": tw_pcs(tw_pc_val, obs_arr, t),
-            "qw_pc": qw_pc_val,
-            "qw_pcs": qw_pcs(qw_pc_val, obs_arr, q_value),
+            "pcs": pcs_val
         }
 
+        results = []
+
+        # TW-Metriken – separat über t-Quantile
+        for t_quantile in t_quantiles:
+            t = np.nanquantile(obs_arr, t_quantile)
+            tw_pc_val = tw_pc(prob_pred, obs_arr, t)
+            tw_pcs_val = tw_pcs(tw_pc_val, obs_arr, t)
+
+            results.append({
+                **base,
+                "t_quantile": t_quantile,
+                "q_value": np.nan,
+                "tw_pc": tw_pc_val,
+                "tw_pcs": tw_pcs_val,
+                "qw_pc": np.nan,
+                "qw_pcs": np.nan,
+            })
+
+        # QW-Metriken – separat über q-Werte
+        for q_value in q_values:
+            qw_pc_val = qw_pc(prob_pred, obs_arr, q_value)
+            qw_pcs_val = qw_pcs(qw_pc_val, obs_arr, q_value)
+
+            results.append({
+                **base,
+                "t_quantile": np.nan,
+                "q_value": q_value,
+                "tw_pc": np.nan,
+                "tw_pcs": np.nan,
+                "qw_pc": qw_pc_val,
+                "qw_pcs": qw_pcs_val,
+            })
+
+        return results
 
     except Exception as e:
         print(f"Failed metric at ({lat},{lon}) for {model}/{var}: {e}")
-        return {k: np.nan for k in [
-        "model", "lat", "lon", "variable", "lead_time", "t_quantile", "q_value",
-        "pc", "pcs", "tw_pc", "tw_pcs", "qw_pc", "qw_pcs"]}
-
+        return [{
+                "model": model,
+                "lat": float(lat),
+                "lon": float(lon),
+                "variable": var,
+                "lead_time": int(lead_time / np.timedelta64(1, "D")),
+                "t_quantile": tq,
+                "q_value": qv,
+                "pc": np.nan,
+                "pcs": np.nan,
+                "tw_pc": np.nan,
+                "tw_pcs": np.nan,
+                "qw_pc": np.nan,
+                "qw_pcs": np.nan
+         } for tq in t_quantiles for qv in q_values]
 # ----------------------------------------------------
 #  CONFIGURATION  (structure wie zuvor – aber nur IFS)
 # ----------------------------------------------------
@@ -270,15 +303,15 @@ obs_sources = {
 }
 
 variables = [
-    "2m_temperature",
-    "mean_sea_level_pressure",
     "10m_wind_speed",
+    "2m_temperature",
+    "mean_sea_level_pressure"    
 ]
 
-lead_time = np.timedelta64(7, "D")
+lead_time = np.timedelta64(1, "D")
 time_range = slice("2020-01-01", "2020-12-31")
 
-n_jobs = 5
+n_jobs = 6
 
 # ----------------------------------------------------
 #  MAIN WORK
@@ -319,9 +352,7 @@ for obs_name, obs_info in obs_sources.items():
                 for mdl in model_names:
                     if mdl not in forecast_ds:
                         continue
-                    for t_quantile in t_quantiles:
-                        for q_value in q_values:
-                            tasks.append((mdl, lat, lon, lead_time, time_range, var, t_quantile, q_value, forecast_ds, observations))
+                    tasks.append((mdl, lat, lon, lead_time, time_range, var, t_quantiles, q_values, forecast_ds, observations))
 
 
 
