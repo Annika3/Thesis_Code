@@ -385,134 +385,126 @@ def plot_spatial_map(
     5×3 panel of global maps for `metric_base` (with optional `level`)
     of `forecast_model` against `obs_source`.
 
-    metric_base : one of "pc","pcs","qw_pc","qw_pcs","tw_pc","tw_pcs"  
-    level       : numeric quantile/threshold (e.g. 0.9, 0.95) or None for base metrics  
-    obs_source  : "ifs" or "era5"  
-    forecast_model : "hres", "pangu", or "graphcast"  
-    """
-    # helper dicts (assume these live at module level)
-    NAME_MAP = {
-        'mean_sea_level_pressure': 'MSLP',
-        '2m_temperature':           'T2M',
-        '10m_wind_speed':           'WS10',
-    }
-    BASE_MODEL_TITLES = {
-        'hres':      'IFS‑HRES',
-        'pangu':     'Pangu',
-        'graphcast': 'GraphCast',
-    }
+    metric_base:
+      - 'pc' or 'pcs'       → pure score (ignores level)
+      - 'tw_pc','tw_pcs'     → threshold‐weighted (requires level)
+      - 'qw_pc','qw_pcs'     → quantile‐weighted   (requires level)
 
-    # 1) determine which model key appears in the CSVs
-    if obs_source == 'ifs' and forecast_model in ('pangu', 'graphcast'):
+    level         : float threshold/quantile (e.g. 0.9, 0.95), or None for pure metrics
+    obs_source    : 'ifs' or 'era5'
+    forecast_model: 'hres', 'pangu', or 'graphcast'
+    """
+    # Only append “_operational” when comparing to IFS
+    if obs_source == "ifs" and forecast_model in ("pangu", "graphcast"):
         model_key = f"{forecast_model}_operational"
     else:
         model_key = forecast_model
 
-    # 2) build row‐filter lambda
     def _filter(df: pd.DataFrame) -> pd.DataFrame:
-        dfm = df[df['model'] == model_key]
-        if metric_base in ('pc','pcs'):
-            return dfm[dfm['t_quantile'].isna() & dfm['q_value'].isna()]
-        elif metric_base.startswith('qw_'):
-            if level is None:
-                raise ValueError("Must supply level for quantile metrics")
-            return dfm[dfm['q_value'] == level]
-        elif metric_base.startswith('tw_'):
-            if level is None:
-                raise ValueError("Must supply level for threshold metrics")
-            return dfm[dfm['t_quantile'] == level]
-        else:
-            raise ValueError(f"Unknown metric_base {metric_base!r}")
+        dfm = df[df["model"] == model_key]
+        # pure base metrics: include all non‐NaN metric_base values
+        if metric_base in ("pc", "pcs"):
+            return dfm.dropna(subset=[metric_base])
+        # weighted variants require level
+        if level is None:
+            raise ValueError(f"Must supply `level` for metric '{metric_base}'")
+        if metric_base.startswith("tw_"):
+            return dfm[dfm["t_quantile"] == level]
+        if metric_base.startswith("qw_"):
+            return dfm[dfm["q_value"]    == level]
+        raise ValueError(f"Unknown metric_base '{metric_base}'")
 
-    # 3) global vmin/vmax
+    # gather vmin/vmax
     all_vals = []
     for lt in LEAD_TIMES:
         for var in VARIABLES:
-            fp = os.path.join(SCORE_DATA_DIR, f"{var}_lead{lt}d_{obs_source}.csv")
-            if not os.path.exists(fp):
+            fn   = f"{var}_lead{lt}d_{obs_source}.csv"
+            path = os.path.join(SCORE_DATA_DIR, fn)
+            if not os.path.exists(path):
                 continue
-            df = pd.read_csv(fp)
-            sub = _filter(df)
-            if sub.empty:
-                continue
-            all_vals.append(sub.groupby(['lat','lon'])[metric_base].mean().values)
+            sub = _filter(pd.read_csv(path))
+            if not sub.empty:
+                all_vals.append(sub.groupby(["lat","lon"])[metric_base].mean().values)
+
     if not all_vals:
-        raise RuntimeError(f"No data for {metric_base} level={level} model={model_key} obs={obs_source}")
+        suffix = "" if metric_base in ("pc","pcs") else f" (level={level})"
+        raise RuntimeError(f"No data for {metric_base.upper()}{suffix} with model_key='{model_key}'")
+
     flat = np.concatenate([v.flatten() for v in all_vals])
     vmin, vmax = np.nanmin(flat), np.nanmax(flat)
 
-    # 4) create figure
-    n_rows, n_cols = len(LEAD_TIMES), len(VARIABLES)
+    # build panel
     fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(4 * n_cols, 3 * n_rows),
-        subplot_kw={'projection': projection},
+        len(LEAD_TIMES), len(VARIABLES),
+        figsize=(4*len(VARIABLES), 3*len(LEAD_TIMES)),
+        subplot_kw={"projection": projection},
         constrained_layout=True
     )
     axes = np.atleast_2d(axes)
 
-    # 5) fill subplots
     for i, lt in enumerate(LEAD_TIMES):
         for j, var in enumerate(VARIABLES):
             ax = axes[i, j]
-            fp = os.path.join(SCORE_DATA_DIR, f"{var}_lead{lt}d_{obs_source}.csv")
-            if not os.path.exists(fp):
+            fn   = f"{var}_lead{lt}d_{obs_source}.csv"
+            path = os.path.join(SCORE_DATA_DIR, fn)
+            if not os.path.exists(path):
                 ax.set_facecolor("lightgray")
                 ax.coastlines()
                 ax.set_title("missing")
                 continue
 
-            df = pd.read_csv(fp)
-            sub = _filter(df)
+            sub = _filter(pd.read_csv(path))
             if sub.empty:
                 ax.set_facecolor("lightgray")
                 ax.coastlines()
                 ax.set_title("no data")
                 continue
 
-            dfm = sub.groupby(['lat','lon'])[metric_base].mean().reset_index()
-            lons = np.sort(dfm['lon'].unique())
-            lats = np.sort(dfm['lat'].unique())
-            grid = dfm.pivot(index='lat', columns='lon', values=metric_base).values
-
-            lon_g, lat_g = np.meshgrid(lons, lats, indexing='xy')
+            grid = (
+                sub.groupby(["lat","lon"])[metric_base]
+                   .mean().reset_index()
+                   .pivot(index="lat", columns="lon", values=metric_base)
+                   .values
+            )
+            lon_g, lat_g = np.meshgrid(
+                np.sort(sub["lon"].unique()),
+                np.sort(sub["lat"].unique())
+            )
             mesh = ax.pcolormesh(
                 lon_g, lat_g, grid,
                 transform=ccrs.PlateCarree(),
                 cmap=cmap, vmin=vmin, vmax=vmax,
-                shading='nearest'
+                shading="nearest"
             )
             ax.coastlines(linewidth=0.5)
-
             if i == 0:
                 ax.set_title(NAME_MAP[var], fontsize=12)
             if j == 0:
-                label = f"Lead Time: {lt} day" if lt == 1 else f"Lead Time: {lt} days"
-                ax.text(-0.1, 0.5, label,
-                        transform=ax.transAxes,
-                        va='center', ha='right', rotation=90,
-                        fontsize=10)
+                ax.text(-0.1, 0.5, f"Lead {lt}d",
+                        transform=ax.transAxes, va="center",
+                        ha="right", rotation=90, fontsize=10)
 
-    # 6) super‑title & colorbar
-    lvl_str = f"={level}" if level is not None else ""
-    model_title = BASE_MODEL_TITLES[forecast_model]
-    if obs_source == 'ifs' and forecast_model in ('pangu', 'graphcast'):
-        model_title += '‑Operational'
-
+    # super‐title & colorbar
+    lvl_str    = "" if metric_base in ("pc","pcs") else f"={level}"
+    mt         = BASE_MODEL_TITLES[forecast_model]
+    if obs_source == "ifs" and forecast_model in ("pangu","graphcast"):
+        mt += "-Operational"
     fig.suptitle(
-        f"{metric_base}{lvl_str} for {model_title} vs {obs_source.upper()}",
+        f"{metric_base.upper()}{lvl_str} for {mt} vs {obs_source.upper()}",
         y=0.98, fontsize=14
     )
-    cbar = fig.colorbar(
-        mesh, ax=axes.ravel().tolist(),
-        orientation='horizontal', fraction=0.05, pad=0.02
-    )
-    cbar.set_label(metric_base, fontsize=12)
+    cbar = fig.colorbar(mesh, ax=axes.ravel().tolist(),
+                        orientation="horizontal", fraction=0.05, pad=0.02)
+    cbar.set_label(metric_base.upper(), fontsize=12)
 
-    # 7) save & show
-    out = f"panel_{metric_base}{('_'+str(level)) if level is not None else ''}_{forecast_model}_vs_{obs_source}.png"
-    fig.savefig(os.path.join(PLOTS_DIR, out), dpi=150, bbox_inches='tight')
+    # save & show
+    suffix = "" if metric_base in ("pc","pcs") else f"_{level}"
+    out    = f"panel_{metric_base}{suffix}_{forecast_model}_vs_{obs_source}.png"
+    fig.savefig(os.path.join(PLOTS_DIR, out), dpi=150, bbox_inches="tight")
     plt.show()
+
+
+
 
 # --------------------------- Panel functions -------------------------
 
@@ -757,6 +749,174 @@ def plot_sensitivity_panel(
     plt.show()
 
 
+def plot_performance_diff_panel(
+    summary_df: pd.DataFrame,
+    obs_source: str,
+    ai_model: str,
+    base_metric: str = "pc",
+    metric_type: str = "tw",
+    diff_type: str = "absolute"  # or 'percent'
+) -> None:
+    """
+    3-row panel: per variable columns, lead_time on x-axis.
+    Row 1: BASE metric curves (HRES vs AI).
+    Row 2: BASE metric difference (HRES vs AI) as specified by diff_type ('absolute' or 'percent').
+    Row 3: Differences for each level of metric_type, overlaid with legend, by diff_type.
+    Rows 2 and 3 share identical y-axis limits for comparability.
+    """
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    # validate inputs
+    BASE = base_metric.lower()
+    if BASE not in ("pc", "pcs"):
+        raise ValueError("base_metric must be 'pc' or 'pcs'")
+    BASE_UP = BASE.upper()
+
+    if metric_type not in ("tw", "qw"):
+        raise ValueError("metric_type must be 'tw' or 'qw'")
+
+    if diff_type not in ("absolute", "percent"):
+        raise ValueError("diff_type must be 'absolute' or 'percent'")
+
+    # determine model keys
+    hres_key = "hres"
+    if obs_source == "ifs" and ai_model in ("pangu", "graphcast"):
+        ai_key = f"{ai_model}_operational"
+    else:
+        ai_key = ai_model
+
+    ai_label = BASE_MODEL_TITLES.get(ai_model, ai_model.title())
+
+    # filter to obs_source
+    df = summary_df[summary_df["obs_source"] == obs_source]
+
+    # detect levels dynamically
+    prefix = f"{metric_type}_{BASE_UP}_"
+    levels = sorted({float(col.split("_")[-1]) for col in df.columns if col.startswith(prefix)})
+
+    # setup panel
+    n_rows, n_cols = 3, len(VARIABLES)
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(4 * n_cols, 3 * n_rows),
+        sharex=True,
+        constrained_layout=True
+    )
+    axes = np.atleast_2d(axes)
+
+    # Row 1: BASE curves
+    for j, var in enumerate(VARIABLES):
+        ax = axes[0, j]
+        sub = df[df["variable"] == var]
+        for model_key, label in [(hres_key, BASE_MODEL_TITLES['hres']), (ai_key, ai_label)]:
+            seg = sub[sub['model'] == model_key]
+            if seg.empty:
+                continue
+            ax.plot(seg['lead_time'], seg[BASE_UP], marker='o', ms=5, label=label)
+        if j == 0:
+            ax.set_ylabel(BASE_UP)
+        ax.set_title(NAME_MAP.get(var, var))
+        ax.grid(alpha=0.3)
+        if j == n_cols - 1:
+            ax.legend(loc='best')
+
+    # prepare diff data
+    diff_values = []
+    base_diffs = {}
+    level_diffs = {lvl: {} for lvl in levels}
+
+    # compute diffs
+    for var in VARIABLES:
+        sub = df[df['variable'] == var]
+        # base metric
+        h = sub[sub['model'] == hres_key][['lead_time', BASE_UP]]
+        a = sub[sub['model'] == ai_key][['lead_time', BASE_UP]]
+        m_base = h.merge(a, on='lead_time', suffixes=('_hres','_ai')).dropna()
+        if not m_base.empty:
+            if diff_type == 'absolute':
+                if BASE == 'pc':
+                    m_base['diff'] = m_base[f'{BASE_UP}_hres'] - m_base[f'{BASE_UP}_ai']
+                else:
+                    m_base['diff'] = m_base[f'{BASE_UP}_ai'] - m_base[f'{BASE_UP}_hres']
+            else:  # percent
+                if BASE == 'pc':
+                    m_base['diff'] = ((m_base[f'{BASE_UP}_hres'] - m_base[f'{BASE_UP}_ai']) / m_base[f'{BASE_UP}_hres']) * 100
+                else:
+                    m_base['diff'] = ((m_base[f'{BASE_UP}_ai'] - m_base[f'{BASE_UP}_hres']) / m_base[f'{BASE_UP}_hres']) * 100
+            base_diffs[var] = m_base
+            diff_values.extend(m_base['diff'].values)
+
+        # levels
+        for lvl in levels:
+            col = f"{metric_type}_{BASE_UP}_{lvl}"
+            h_l = sub[sub['model'] == hres_key][['lead_time', col]]
+            a_l = sub[sub['model'] == ai_key][['lead_time', col]]
+            m_lvl = h_l.merge(a_l, on='lead_time', suffixes=('_hres','_ai')).dropna()
+            if not m_lvl.empty:
+                if diff_type == 'absolute':
+                    if BASE == 'pc':
+                        m_lvl['diff'] = m_lvl[f'{col}_hres'] - m_lvl[f'{col}_ai']
+                    else:
+                        m_lvl['diff'] = m_lvl[f'{col}_ai'] - m_lvl[f'{col}_hres']
+                else:
+                    if BASE == 'pc':
+                        m_lvl['diff'] = ((m_lvl[f'{col}_hres'] - m_lvl[f'{col}_ai']) / m_lvl[f'{col}_hres']) * 100
+                    else:
+                        m_lvl['diff'] = ((m_lvl[f'{col}_ai'] - m_lvl[f'{col}_hres']) / m_lvl[f'{col}_hres']) * 100
+                level_diffs[lvl][var] = m_lvl
+                diff_values.extend(m_lvl['diff'].values)
+
+    # common y-limits
+    y_min, y_max = (min(diff_values), max(diff_values)) if diff_values else (None, None)
+
+    # Row 2: BASE metric difference
+    for j, var in enumerate(VARIABLES):
+        ax = axes[1, j]
+        m = base_diffs.get(var)
+        ylabel = f"{BASE_UP} difference"
+        if m is None or m.empty:
+            ax.set_facecolor('lightgray')
+            ax.set_title('no data')
+        else:
+            ax.plot(m['lead_time'], m['diff'], marker='o', ms=5, label=ylabel)
+            ax.legend(loc='best')
+        if j == 0:
+            ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.3)
+        if y_min is not None:
+            ax.set_ylim(y_min, y_max)
+        if 1 == n_rows - 1:
+            ax.set_xlabel('Lead Time [d]')
+
+    # Row 3: differences for each level
+    for j, var in enumerate(VARIABLES):
+        ax = axes[2, j]
+        for lvl, diffs in level_diffs.items():
+            m = diffs.get(var)
+            if m is None or m.empty:
+                continue
+            label = f"{metric_type.upper()}={lvl}"
+            ax.plot(m['lead_time'], m['diff'], marker='o', ms=5, label=label)
+        if j == 0:
+            ax.set_ylabel(ylabel)
+        ax.set_xlabel('Lead Time [d]')
+        ax.grid(alpha=0.3)
+        if y_min is not None:
+            ax.set_ylim(y_min, y_max)
+        ax.legend(loc='best')
+
+    # title & save
+    fig.suptitle(
+        f"Performance Comparison – {BASE_UP} + {diff_type} difference of {ai_label} over IFS-HRES\n"
+        f"(obs: {obs_source.upper()}, metric: {metric_type.upper()})",
+        y=0.98
+    )
+    out_filename = f"perf_diff_panel_{BASE}_{metric_type}_{diff_type}_{ai_model}_vs_hres_{obs_source}.png"
+    fig.savefig(os.path.join(PLOTS_DIR, out_filename), dpi=150, bbox_inches='tight')
+    plt.show()
+
 
 
 
@@ -764,17 +924,18 @@ def plot_sensitivity_panel(
 
 if __name__ == '__main__':
 
+    ## PANELS
+    RUN_PANEL_AVERAGED_GRIDPOINTS = False
+    RUN_PANEL_SENSITIVITY = False
+    RUN_PERF_DIFF_PANEL = False
+
     ## MAPS    
     RUN_THRESHOLD_MAP   = False    # threshold-map
     THRESHOLD_LEVEL = 0.9 # level to be depicted in threshold map
 
     RUN_3_SCORES_HEATMAP = False      # 3×3-PCS-Panel (comparison )
 
-    RUN_FIXED_SCORE_HEATMAP = False  # 5×3-PCS-Panel with all variables & lead times
-
-    ## PANELS
-    RUN_PANEL_AVERAGED_GRIDPOINTS = False
-    RUN_PANEL_SENSITIVITY = True
+    RUN_FIXED_SCORE_HEATMAP = True  # 5×3-PCS-Panel with all variables & lead times
 
     ## DATA
     LOAD_SUMMARY = False  # recompute summary or load existing 
@@ -802,7 +963,7 @@ if __name__ == '__main__':
 
     if RUN_FIXED_SCORE_HEATMAP:
         plot_spatial_map(
-        metric_base   = "tw_pcs",
+        metric_base   = "tw_pcs", # "pcs", "tw_pcs", "qw_pcs"
         level          = 0.95,
         obs_source     = "era5",
         forecast_model = "graphcast"
@@ -813,10 +974,10 @@ if __name__ == '__main__':
 
     if RUN_3_SCORES_HEATMAP:
         plot_pcs_twq_map(
-            lead_time       = 3,
+            lead_time       = 5,
             t_level         = 0.95,
             q_level         = 0.95,
-            obs_source      = "ifs"   ,       # or "era5"
+            obs_source      = "era5"   ,       # "ifs" or "era5"
             forecast_model  = "graphcast" ,  # "hres", "pangu", or "graphcast"
         )
 
@@ -826,15 +987,28 @@ if __name__ == '__main__':
         plot_model_panel(
             summary_df  = summary_df,
             obs_source  = "era5"   , # ifs or "era5"
-            t_level     = 0.95,
-            q_level     = 0.95,
-            base_metric = "pc"    # or "pc"
+            t_level     = 0.99,
+            q_level     = 0.99,
+            base_metric = "pcs"    # "pc" or "pcs"
         )
 
     if RUN_PANEL_SENSITIVITY:
         plot_sensitivity_panel(
             summary_df  = summary_df,
             obs_source  = "era5",  # ifs or "era5"
-            base_metric = "pc",    # or "pcs"
-            weight_type = "qw"     # or "tw"
+            base_metric = "pcs",    # or "pcs"
+            weight_type = "tw"     # or "tw"
+        )
+    
+
+    if RUN_PERF_DIFF_PANEL:
+        # choose obs (“ifs” or “era5”), AI model (“graphcast” or “pangu”),
+        # base_metric (“pc” or “pcs”) and metric_type (“tw” or “qw”)
+        plot_performance_diff_panel(
+            summary_df=summary_df,
+            obs_source="era5", # “ifs” or “era5”
+            ai_model="graphcast", # “graphcast” or “pangu”
+            base_metric="pc", #“pc” or “pcs”
+            metric_type="qw", # “tw” or “qw”
+            diff_type = "absolute"  # "absolute" or "percent"
         )
