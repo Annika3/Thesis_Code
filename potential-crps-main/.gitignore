@@ -142,14 +142,18 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# ignore the full weatherbench2 checkout
-weatherbench2/
 
-# ignore results directory
-wb2/results/
 
-# ignore data directory
-data/
+# ignore old directories
+**/plots_archive (from paper)/
+**/plots_archive (from paper)/
+**/wb2_paper_analysis/
+
+# ignore test and redundant files
+**/construct_era5_climatology_forecasts.py
+**/raw_scores_for_permutation_testing.py
+**/sanity_checks.py
+**/weighted_implementation_test.py
 
 # Ignore large binary-like or auto-generated output
 *.zarr/

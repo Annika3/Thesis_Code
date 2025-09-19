@@ -188,7 +188,7 @@ def qw_pcs(pred, y, q):
 
         type(prob_pred).qw_crps = qw_crps # monkey-patch 
 
-        qw_crps_scores = prob_pred.tw_crps(y, q)
+        qw_crps_scores = prob_pred.qw_crps(y, q)
         mean_qw_crps = np.mean(qw_crps_scores)
         return mean_qw_crps
     pc_ref = climatological_qw_pc(y, q)
@@ -225,7 +225,7 @@ def run_simulation_example_1(n=1000, square_y=False):
         y = pred_data['y']**2
         add_name = '_squared'
 
-    loss_fcts = {'RMSE': rmse, 'MAE': mae, 'QL90': ql90, 'PC': pc, 'ACC': acc, 'CPA': cpa, 'PCS': pcs, 'tw_PC': lambda pred, y: tw_pc(pred, y, t=24), 'tw_PCS': lambda pred, y: tw_pcs(pred, y, t=24), 'qw_PC': lambda pred, y: qw_pc(pred, y, q=0.9), 'qw_PCS': lambda pred, y: qw_pcs(pred, y, q=0.9)}
+    loss_fcts = {'RMSE': rmse, 'MAE': mae, 'QL90': ql90, 'PC': pc, 'ACC': acc, 'CPA': cpa, 'PCS': pcs, 'tw_PC': lambda pred, y: tw_pc(pred, y, t=10), 'tw_PCS': lambda pred, y: tw_pcs(pred, y, t=10), 'qw_PC': lambda pred, y: qw_pc(pred, y, q=0.9), 'qw_PCS': lambda pred, y: qw_pcs(pred, y, q=0.9)}
 
     fcsts = pred_data.columns[pred_data.columns != 'y']
     loss_vals = np.zeros((len(fcsts), len(loss_fcts)))
@@ -389,9 +389,9 @@ if __name__ == '__main__':
     if not os.path.exists(save_plots):
         print(f'Please create directory {save_plots}')
     else:
-         run_simulation_example_1(n=1000, square_y=False)
-         test_of_new_functions()
-        # run_simulation_example_1(n=1000, square_y=True)
+        # run_simulation_example_1(n=1000, square_y=False)
+        # test_of_new_functions()
+        run_simulation_example_1(n=10000, square_y=True)
         # run_simulation_example_2(thresh_list=np.linspace(1, 40, 40), add_name='_graph')
         # run_simulation_example_2(thresh_list=[30], add_name='_graph')
         # plot_thresh_graph()
