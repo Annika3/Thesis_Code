@@ -10,11 +10,11 @@ from tqdm import tqdm
 import timeit
 import os
 
-from isodisreg import idr       # to compute isotonic regression fit
-import urocc                    # to compute CPA
+from isodisreg import idr    
+import urocc                    
 
-BASE_DIR   = os.path.dirname(os.path.dirname(__file__))          # one level up
-save_plots = os.path.join(BASE_DIR, 'simulation_study', 'plots')
+BASE_DIR   = os.path.dirname(__file__)
+save_plots = os.path.join(BASE_DIR,'plots')
 
 # define possible error measures ----------------------------------------------------
 
@@ -88,7 +88,7 @@ def tw_crps(self, obs, t):
     T = [t] * len(y)   
     return list(map(tw_crps0, y, p, w, x, T))
 
-def qw_crps0(y, p, w, x, q):
+def qw_crps0(y, w, x, q):
         c_cum = np.cumsum(w)
         c_cum_prev = np.hstack(([0], c_cum[:-1]))
         c_cum_star = np.maximum(c_cum, q)
@@ -119,7 +119,7 @@ def qw_crps(self, obs, q):
     p = list(map(get_cdf, predictions))
     w = list(map(get_weights, p))
     Q = [q] * len(y)
-    return list(map(qw_crps0, y, p, w, x, Q))
+    return list(map(qw_crps0, y, w, x, Q))
 
 def tw_pc(pred, y, t): 
     fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
@@ -142,14 +142,13 @@ def qw_pc(pred, y, q=0.9):
 
 def my_crps(x, cum_weights, y):
     weights = cum_weights - np.hstack((np.zeros(((y.size, 1))), cum_weights[:, :-1]))
-    # the formula is simply extracted from idr predict crps function
     return 2 * np.sum(weights * (np.array((y < x)) - cum_weights + 0.5 * weights) * np.array(x - y), axis=1)
 
 def pc_time(pred, y):
     time1 = timeit.default_timer()
     fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
     time2 = timeit.default_timer()
-    mean_crps = np.mean(my_crps(np.reshape(fitted_idr.thresholds, (1, -1)), # reshape to make it braodcast-able
+    mean_crps = np.mean(my_crps(np.reshape(fitted_idr.thresholds, (1, -1)), 
                                 fitted_idr.ecdf,
                                 np.concatenate(fitted_idr.y.values).reshape((-1, 1))))
     time3 = timeit.default_timer()
@@ -159,6 +158,7 @@ def pc_time(pred, y):
 def pcs(pred, y):
     # crps of the climatological forecast
     pc_ref = np.mean(np.abs(np.tile(y, (len(y), 1)) - np.tile(y, (len(y), 1)).transpose())) / 2
+    print("pc_ref", pc_ref)
 
     return (pc_ref - pc(pred, y)) / pc_ref
 
@@ -166,7 +166,6 @@ def tw_pcs(pred, y, t):
 
     y_thresh = np.maximum(y, t)
     pc_ref = np.mean(np.abs(np.tile(y_thresh, (len(y_thresh), 1)) - np.tile(y_thresh, (len(y_thresh), 1)).transpose())) / 2
-
     pc_model = tw_pc(pred, y, t)
 
     pcs = (pc_ref - pc_model) / pc_ref
@@ -177,25 +176,18 @@ def qw_pcs(pred, y, q):
 
     pc_model = qw_pc(pred, y, q)
     
-    def climatological_qw_pc(y, q):
-        """
-        Compute PCRPS using a climatological forecast: fit IDR on y, predict same pooled ECDF for all y.
-        This avoids overfitting and returns the proper CRPS reference value.
-        """
-        x_dummy = np.zeros_like(y)  # All predictors the same -> 1 pooled distribution
-        fitted_idr = idr(y, pd.DataFrame({'x': x_dummy}))
-        prob_pred = fitted_idr.predict(pd.DataFrame({'x': x_dummy}))
+    def qw_pc0(y, q):
+        y = np.sort(np.asarray(y))
+        n = len(y)
+        w = np.full(n, 1.0 / n)  # uniform weights
 
-        type(prob_pred).qw_crps = qw_crps # monkey-patch 
-
-        qw_crps_scores = prob_pred.qw_crps(y, q)
-        mean_qw_crps = np.mean(qw_crps_scores)
-        return mean_qw_crps
-    pc_ref = climatological_qw_pc(y, q)
-    pcs = (pc_ref - pc_model) / pc_ref    
+        pc_ref = sum(qw_crps0(y_i, w, y, q) for y_i in y) / n
+        return pc_ref
+    
+    pc_ref = qw_pc0(y, q)
+    pcs = (pc_ref - pc_model) / pc_ref
+    print("qw_pc_ref", pc_ref)
     return pcs
-
-
 
 
 # simulation routines ----------------------------------------------------------------
@@ -225,7 +217,7 @@ def run_simulation_example_1(n=1000, square_y=False):
         y = pred_data['y']**2
         add_name = '_squared'
 
-    loss_fcts = {'RMSE': rmse, 'MAE': mae, 'QL90': ql90, 'PC': pc, 'ACC': acc, 'CPA': cpa, 'PCS': pcs, 'tw_PC': lambda pred, y: tw_pc(pred, y, t=10), 'tw_PCS': lambda pred, y: tw_pcs(pred, y, t=10), 'qw_PC': lambda pred, y: qw_pc(pred, y, q=0.9), 'qw_PCS': lambda pred, y: qw_pcs(pred, y, q=0.9)}
+    loss_fcts = {'RMSE': rmse, 'MAE': mae, 'QL90': ql90, 'PC': pc, 'ACC': acc, 'CPA': cpa, 'PCS': pcs, 'tw_PC': lambda pred, y: tw_pc(pred, y, t=20), 'tw_PCS': lambda pred, y: tw_pcs(pred, y, t=20), 'qw_PC': lambda pred, y: qw_pc(pred, y, q=0.9), 'qw_PCS': lambda pred, y: qw_pcs(pred, y, q=0.9)}
 
     fcsts = pred_data.columns[pred_data.columns != 'y']
     loss_vals = np.zeros((len(fcsts), len(loss_fcts)))
@@ -389,7 +381,7 @@ if __name__ == '__main__':
     if not os.path.exists(save_plots):
         print(f'Please create directory {save_plots}')
     else:
-        # run_simulation_example_1(n=1000, square_y=False)
+        # run_simulation_example_1(n=10000, square_y=False)
         # test_of_new_functions()
         run_simulation_example_1(n=10000, square_y=True)
         # run_simulation_example_2(thresh_list=np.linspace(1, 40, 40), add_name='_graph')
@@ -398,102 +390,4 @@ if __name__ == '__main__':
         # print_results()
         # analyze_runtime()
         # plot_runtime()
-
-# archive ----------------------------------------------------------------
-def tw_pc_masked(pred, y, t): 
-    fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
-    prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
-
-    type(prob_pred).tw_crps_masked = tw_crps_masked # monkey-patch the tw_crps_masked method into the prediction object
-
-    tw_crps_scores = prob_pred.tw_crps_masked(y, t)
-    mean_tw_crps = np.mean(tw_crps_scores)
-    return mean_tw_crps
-
-def tw_crps_masked(self, obs, t):
-    
-    predictions = self.predictions
-    y = np.array(obs)
-    if y.ndim > 1:
-        raise ValueError("obs must be a 1-D array")
-    if np.isnan(np.sum(y)):
-        raise ValueError("obs contains nan values")
-    if y.size != 1 and len(y) != len(predictions):
-        raise ValueError("obs must have length 1 or the same length as predictions")
-
-    def get_points(pred):
-        return np.array(pred.points)
-    def get_cdf(pred):
-        return np.array(pred.ecdf)
-    def modify_points(cdf):
-        return np.hstack([cdf[0], np.diff(cdf)])
-
-    def tw_crps0(y, p, w, x, t):
-        mask = (x >= t).astype(float)
-        w_masked = w * mask
-        return 2 * np.sum(w_masked * ((y < x).astype(float) - p + 0.5 * w_masked) * (x - y))
-
-    x = list(map(get_points, predictions))
-    p = list(map(get_cdf, predictions))
-    w = list(map(modify_points, p))
-
-    T = [t] * len(y)   
-    return list(map(tw_crps0, y, p, w, x, T))
-
-
-def pc0(y):
-    n = len(y)
-    y_sorted = np.sort(y)
-    ranks = np.arange(1, n + 1)          
-    weights = 2 * ranks - n - 1  
-
-    return np.sum(weights * y_sorted) / (n**2)
-
-def qw_pc_approx(pred, y, q=0.9):
-    
-    fitted_idr = idr(y, pd.DataFrame({"x": pred}, columns=["x"]))
-    prob_pred = fitted_idr.predict(pd.DataFrame({"x": pred}, columns=["x"]))
-    type(prob_pred).qw_crps_approx = qw_crps_approx 
-    qwcrps_scores = prob_pred.qw_crps_approx(y, q=q)
-    return np.mean(qwcrps_scores)
-
-
-def qw_crps_approx_paper (self, obs, q=0.9):
-
-    predictions = self.predictions
-    y = np.array(obs)
-    J = 1999
-
-    if y.ndim > 1:
-        raise ValueError("obs must be a 1-D array")
-    if np.isnan(np.sum(y)):
-        raise ValueError("obs contains nan values")
-    if y.size != 1 and len(y) != len(predictions):
-        raise ValueError("obs must have length 1 or the same length as predictions")
-
-    alphas = np.arange(1, J) / J  # j/J, j=1,...,J-1
-    weights = (alphas > q).astype(float)
-    qf = self.qpred(alphas)  # shape (n_samples, J-1)
-    def qw_crps_single(y_i, qf_i):
-        pinball = 2 * ((y_i < qf_i).astype(float) - alphas) * (qf_i - y_i)
-        return np.sum(weights * pinball) / (J - 1)
-    
-    return [qw_crps_single(y[i], qf[i, :]) for i in range(len(y))]
-
-    
-    
-
-def qw_crps_approx(self, obs, q=0.9):
-    
-    q_levels = np.linspace(0.005, 0.995, 199)
-    y = np.array(obs)
-    qf = self.qpred(q_levels)
-    weights = (q_levels > q).astype(float)
-    d_alpha = q_levels[1] - q_levels[0] 
-
-    def qw_crps_approx_single(y_i, qf_i):
-        indicator = (qf_i >= y_i).astype(float)
-        return 2 * np.sum(weights * (indicator - q_levels) * (qf_i - y_i) * d_alpha)
-
-    return [qw_crps_approx_single(y[i], qf[i, :]) for i in range(len(y))]
 
