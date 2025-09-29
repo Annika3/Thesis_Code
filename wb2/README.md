@@ -6,7 +6,7 @@ This folder contains the implementation of the case study described in Chapter 5
 
 ## Workflow
 
-The scripts are organized sequentially. Running them in order reproduces the complete pipeline:
+The scripts are organized in sequence, and running them in order will reproduce the full pipeline. The process begins with data loading, followed by score computation. Scripts prefixed with **03** can be executed independently of one another, each offering a different perspective for analysis.
 
 1. **01_load_data.py**  
    Loads WeatherBench 2 forecasts and reference data.  
@@ -51,7 +51,7 @@ The scripts are organized sequentially. Running them in order reproduces the com
    - `RUN_BS_QS_GRIDPOINT=True` with `SP_SCORE_TYPE`, `SP_GROUND_TRUTH`, and location  
    - `RUN_BOTH_SCORES_GRIDPOINT_FIXED_LEAD=True` with `FL_*` parameters  
 
-6. **03_visual_analysis.py** / **xx_visual_analysis.py**  
+6. **03_visual_analysis.py** 
    Generates global maps and lead-time panels for PC/PCS and their tail-weighted variants, with optional **climatology-referenced** (ERA5 rolling) PCS.  
    Caches reference PC(0) per gridpoint in `score_data/era5_ref_pc/` to avoid recomputation.  
 
